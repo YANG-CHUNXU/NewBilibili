@@ -6,6 +6,7 @@ import NewBiCore
 struct PlayerView: View {
     @StateObject private var viewModel: PlayerViewModel
     @State private var player = AVPlayer()
+    @State private var isPresentingFullScreenPlayer = false
     @State private var statusObserver: NSKeyValueObservation?
     @State private var failedToEndObserver: NSObjectProtocol?
     @State private var isViewVisible = false
@@ -62,12 +63,25 @@ struct PlayerView: View {
             }
 
             if let stream = viewModel.stream {
-                VideoPlayer(player: player)
-                    .frame(minHeight: 220)
-                    .task(id: stream) {
-                        let sessionID = beginPlaybackSession()
-                        await preparePlayback(for: stream, sessionID: sessionID)
+                ZStack(alignment: .topTrailing) {
+                    VideoPlayer(player: player)
+                        .frame(minHeight: 220)
+
+                    Button {
+                        isPresentingFullScreenPlayer = true
+                    } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.headline)
+                            .padding(10)
+                            .background(.ultraThinMaterial, in: Circle())
                     }
+                    .padding(10)
+                    .accessibilityLabel("全屏播放")
+                }
+                .task(id: stream) {
+                    let sessionID = beginPlaybackSession()
+                    await preparePlayback(for: stream, sessionID: sessionID)
+                }
                 Text("清晰度: \(stream.qualityLabel) | 格式: \(stream.format)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -90,6 +104,9 @@ struct PlayerView: View {
             isViewVisible = true
         }
         .onDisappear {
+            guard !isPresentingFullScreenPlayer else {
+                return
+            }
             isViewVisible = false
             invalidatePlaybackSession()
             let seconds = player.currentTime().seconds
@@ -97,6 +114,9 @@ struct PlayerView: View {
                 await viewModel.recordPlayback(progressSeconds: seconds.isFinite ? seconds : 0)
             }
             teardownPlayer()
+        }
+        .fullScreenCover(isPresented: $isPresentingFullScreenPlayer) {
+            FullScreenPlayerView(player: player)
         }
     }
 
@@ -422,4 +442,47 @@ private struct PlaybackDiagnostic {
     let code: String
     let userMessage: String
     let technicalDetail: String?
+}
+
+private struct FullScreenPlayerView: View {
+    let player: AVPlayer
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            FullScreenPlayerController(player: player)
+                .ignoresSafeArea()
+
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.headline)
+                    .foregroundStyle(.white)
+                    .padding(10)
+                    .background(.black.opacity(0.45), in: Circle())
+            }
+            .padding(16)
+            .accessibilityLabel("退出全屏")
+        }
+    }
+}
+
+private struct FullScreenPlayerController: UIViewControllerRepresentable {
+    let player: AVPlayer
+
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let controller = AVPlayerViewController()
+        controller.player = player
+        controller.showsPlaybackControls = true
+        controller.entersFullScreenWhenPlaybackBegins = false
+        controller.exitsFullScreenWhenPlaybackEnds = false
+        return controller
+    }
+
+    func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
+        if controller.player !== player {
+            controller.player = player
+        }
+    }
 }
