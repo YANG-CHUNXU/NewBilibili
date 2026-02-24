@@ -78,6 +78,16 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
             return cached
         }
 
+        var apiError: Error?
+        do {
+            let apiCards = try await fetchSearchVideosFromPublicAPI(keyword: trimmed, page: page)
+            await cache.set(cacheKey, value: apiCards)
+            return apiCards
+        } catch {
+            // 公开搜索接口可能触发风控，继续尝试 HTML 解析回退。
+            apiError = error
+        }
+
         var components = URLComponents(string: "https://search.bilibili.com/video")
         components?.queryItems = [
             URLQueryItem(name: "keyword", value: trimmed),
@@ -88,12 +98,19 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
             throw BiliClientError.invalidInput("搜索参数无效")
         }
 
-        let html = try await fetcher.fetchHTML(url: url)
-        let cards = try parser.parseSearchVideos(from: html)
-        if !cards.isEmpty {
-            await cache.set(cacheKey, value: cards)
+        do {
+            let html = try await fetcher.fetchHTML(url: url)
+            let cards = try parser.parseSearchVideos(from: html)
+            if !cards.isEmpty {
+                await cache.set(cacheKey, value: cards)
+            }
+            return cards
+        } catch {
+            if let apiError {
+                throw apiError
+            }
+            throw error
         }
-        return cards
     }
 
     public func fetchVideoDetail(bvid: String) async throws -> VideoDetail {
@@ -137,8 +154,7 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
             throw BiliClientError.invalidInput("订阅回退参数无效")
         }
 
-        let json = try await fetcher.fetchJSON(url: url)
-        return parseVideoCardsFromPublicJSON(json)
+        return try await fetchVideoCardsFromPublicJSON(url: url, source: "空间视频")
     }
 
     private func fetchSubscriptionVideosFromDynamicAPI(uid: String) async throws -> [VideoCard] {
@@ -150,11 +166,48 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
             throw BiliClientError.invalidInput("动态回退参数无效")
         }
 
-        let json = try await fetcher.fetchJSON(url: url)
-        return parseVideoCardsFromPublicJSON(json)
+        return try await fetchVideoCardsFromPublicJSON(url: url, source: "动态")
     }
 
-    private func parseVideoCardsFromPublicJSON(_ root: Any) -> [VideoCard] {
+    private func fetchSearchVideosFromPublicAPI(keyword: String, page: Int) async throws -> [VideoCard] {
+        var components = URLComponents(string: "https://api.bilibili.com/x/web-interface/search/type")
+        components?.queryItems = [
+            URLQueryItem(name: "search_type", value: "video"),
+            URLQueryItem(name: "keyword", value: keyword),
+            URLQueryItem(name: "page", value: String(page))
+        ]
+
+        guard let url = components?.url else {
+            throw BiliClientError.invalidInput("搜索回退参数无效")
+        }
+
+        return try await fetchVideoCardsFromPublicJSON(url: url, source: "搜索")
+    }
+
+    private func fetchVideoCardsFromPublicJSON(url: URL, source: String) async throws -> [VideoCard] {
+        let json = try await fetcher.fetchJSON(url: url)
+        do {
+            return try parseVideoCardsFromPublicJSON(json, source: source)
+        } catch {
+            guard isRateLimitedError(error) else {
+                throw error
+            }
+
+            await fetcher.primeBilibiliCookiesIfNeeded()
+            let retriedJSON = try await fetcher.fetchJSON(url: url)
+            return try parseVideoCardsFromPublicJSON(retriedJSON, source: source)
+        }
+    }
+
+    private func parseVideoCardsFromPublicJSON(_ root: Any, source: String) throws -> [VideoCard] {
+        if let top = JSONHelpers.dict(root),
+           let code = JSONHelpers.int(top["code"]),
+           code != 0
+        {
+            let message = JSONHelpers.string(top["message"]) ?? JSONHelpers.string(top["msg"]) ?? "未知错误"
+            throw mapPublicAPICodeToError(code: code, message: message, source: source)
+        }
+
         var candidateDicts: [[String: Any]] = []
         JSONHelpers.collectDicts(in: root, where: { dict in
             JSONHelpers.string(dict["bvid"]) != nil && JSONHelpers.string(dict["title"]) != nil
@@ -209,6 +262,22 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
         }
 
         return mapped
+    }
+
+    private func mapPublicAPICodeToError(code: Int, message: String, source: String) -> BiliClientError {
+        switch code {
+        case -352, -412, -509:
+            return .rateLimited
+        default:
+            return .networkFailed("\(source)接口返回异常(code=\(code))：\(message)")
+        }
+    }
+
+    private func isRateLimitedError(_ error: Error) -> Bool {
+        if let known = error as? BiliClientError, known == .rateLimited {
+            return true
+        }
+        return false
     }
 
     private func normalizeImageURL(_ text: String?) -> URL? {

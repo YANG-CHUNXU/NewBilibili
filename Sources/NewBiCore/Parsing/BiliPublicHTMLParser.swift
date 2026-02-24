@@ -99,24 +99,93 @@ public struct BiliPublicHTMLParser: Sendable {
     }
 
     private func parseStateContainer(from html: String) throws -> Any {
+        var fallbackRoot: Any?
+        var decodeError: Error?
+
         let markers = [
-            "window.__INITIAL_STATE__=",
-            "window.__INITIAL_STATE__ =",
-            "window.__initialState__=",
-            "__INITIAL_STATE__="
+            "window.__INITIAL_STATE__",
+            "window.__initialState__",
+            "__INITIAL_STATE__",
+            "window.__pinia",
+            "window.__PINIA__",
+            "window.__NUXT__",
+            "window.__APP_DATA__",
+            "window.__SSR_DATA__",
+            "window.__PRELOADED_STATE__"
         ]
 
         for marker in markers {
-            if let object = ScriptJSONExtractor.extractJSONObject(after: marker, in: html) {
-                return try ScriptJSONExtractor.decodeJSONObject(from: object)
+            if let value = ScriptJSONExtractor.extractJSONValue(after: marker, in: html) {
+                do {
+                    let decoded = try ScriptJSONExtractor.decodeJSONObject(from: value)
+                    if isLikelyStateContainer(decoded) {
+                        return decoded
+                    }
+                    if fallbackRoot == nil {
+                        fallbackRoot = decoded
+                    }
+                } catch {
+                    decodeError = error
+                }
             }
         }
 
-        if let nextData = ScriptJSONExtractor.extractScriptTagContent(id: "__NEXT_DATA__", in: html) {
-            return try ScriptJSONExtractor.decodeJSONObject(from: nextData)
+        let scriptIDs = ["__NEXT_DATA__", "__NUXT_DATA__"]
+        for scriptID in scriptIDs {
+            if let script = ScriptJSONExtractor.extractScriptTagContent(id: scriptID, in: html) {
+                do {
+                    let decoded = try ScriptJSONExtractor.decodeJSONObject(from: script)
+                    if isLikelyStateContainer(decoded) {
+                        return decoded
+                    }
+                    if fallbackRoot == nil {
+                        fallbackRoot = decoded
+                    }
+                } catch {
+                    decodeError = error
+                }
+            }
         }
 
+        for value in ScriptJSONExtractor.extractWindowAssignmentJSONValues(in: html) {
+            do {
+                let decoded = try ScriptJSONExtractor.decodeJSONObject(from: value)
+                if isLikelyStateContainer(decoded) {
+                    return decoded
+                }
+                if fallbackRoot == nil {
+                    fallbackRoot = decoded
+                }
+            } catch {
+                decodeError = error
+            }
+        }
+
+        if let fallbackRoot {
+            return fallbackRoot
+        }
+        if let decodeError = decodeError as? BiliClientError {
+            throw decodeError
+        }
         throw BiliClientError.parseFailed("未找到可解析的页面状态")
+    }
+
+    private func isLikelyStateContainer(_ root: Any) -> Bool {
+        if let dict = JSONHelpers.dict(root) {
+            let likelyKeys: Set<String> = [
+                "videoData", "arcList", "allData", "result", "props", "pinia", "state", "store"
+            ]
+            if !likelyKeys.isDisjoint(with: Set(dict.keys)) {
+                return true
+            }
+        }
+
+        return JSONHelpers.findFirstDict(in: root) { dict in
+            let hasBVID = JSONHelpers.string(dict["bvid"]) != nil
+            let hasTitle = JSONHelpers.string(dict["title"]) != nil
+            let hasPages = JSONHelpers.array(dict["pages"]) != nil
+            return (hasBVID && hasTitle) || (hasBVID && hasPages)
+        } != nil
     }
 
     private func mapVideoCards(from root: Any) -> [VideoCard] {

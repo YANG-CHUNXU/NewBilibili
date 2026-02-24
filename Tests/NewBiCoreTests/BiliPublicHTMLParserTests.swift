@@ -22,6 +22,53 @@ final class BiliPublicHTMLParserTests: XCTestCase {
         XCTAssertTrue(cards.map(\.bvid).contains("BV1C33333333"))
     }
 
+    func testParseSearchVideosFromPiniaState() throws {
+        let html = """
+        <!doctype html>
+        <html><body><script>
+        window.__pinia={"search":{"video":{"result":[{"bvid":"BV1E55555555","title":"搜索结果Pinia","pic":"//i0.hdslb.com/bfs/archive/pinia.jpg","author":"UP_PINIA","mid":"5005"}]}}};
+        </script></body></html>
+        """
+
+        let cards = try parser.parseSearchVideos(from: html)
+
+        XCTAssertEqual(cards.count, 1)
+        XCTAssertEqual(cards.first?.bvid, "BV1E55555555")
+        XCTAssertEqual(cards.first?.authorName, "UP_PINIA")
+    }
+
+    func testParseSubscriptionVideosFromJSONParseDecodeURIComponentState() throws {
+        let state = #"{"arcList":{"vlist":[{"bvid":"BV1F66666666","title":"订阅结果JSONParse","pic":"//i0.hdslb.com/bfs/archive/jsonparse.jpg","author":"UP_JSON","mid":"6006"}]}}"#
+        let encoded = try XCTUnwrap(state.addingPercentEncoding(withAllowedCharacters: .alphanumerics))
+        let html = """
+        <!doctype html>
+        <html><body><script>
+        window.__INITIAL_STATE__ = JSON.parse(decodeURIComponent("\(encoded)"));
+        </script></body></html>
+        """
+
+        let cards = try parser.parseSubscriptionVideos(from: html)
+
+        XCTAssertEqual(cards.count, 1)
+        XCTAssertEqual(cards.first?.bvid, "BV1F66666666")
+        XCTAssertEqual(cards.first?.authorName, "UP_JSON")
+    }
+
+    func testParseSearchVideosFromNuxtDataScriptTag() throws {
+        let html = """
+        <!doctype html>
+        <html><body>
+        <script id="__NUXT_DATA__" type="application/json">{"payload":{"items":[{"bvid":"BV1G77777777","title":"搜索结果Nuxt","pic":"//i0.hdslb.com/bfs/archive/nuxt.jpg","author":"UP_NUXT","mid":"7007"}]}}</script>
+        </body></html>
+        """
+
+        let cards = try parser.parseSearchVideos(from: html)
+
+        XCTAssertEqual(cards.count, 1)
+        XCTAssertEqual(cards.first?.bvid, "BV1G77777777")
+        XCTAssertEqual(cards.first?.authorName, "UP_NUXT")
+    }
+
     func testParseVideoDetail() throws {
         let html = try loadFixture("video_detail_page")
         let detail = try parser.parseVideoDetail(from: html)

@@ -20,7 +20,7 @@ public enum BiliClientError: LocalizedError, Equatable, Sendable {
         case .noPlayableStream:
             return "未找到可直接播放的视频流"
         case .rateLimited:
-            return "请求过于频繁，请稍后重试"
+            return "请求过于频繁或触发风控（如 code -352），请稍后重试"
         case .playbackProxyFailed(let reason):
             return "播放器代理失败：\(reason)"
         case .unsupportedDashStream(let reason):
