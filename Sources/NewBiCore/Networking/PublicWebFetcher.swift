@@ -19,7 +19,10 @@ public final class PublicWebFetcher: @unchecked Sendable {
     }
 
     public func fetchHTML(url: URL) async throws -> String {
-        let data = try await fetchData(url: url, accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        let data = try await fetchData(
+            url: url,
+            accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        )
         if let text = String(data: data, encoding: .utf8) {
             return text
         }
@@ -27,7 +30,15 @@ public final class PublicWebFetcher: @unchecked Sendable {
     }
 
     public func fetchJSON(url: URL) async throws -> Any {
-        let data = try await fetchData(url: url, accept: "application/json,text/plain,*/*")
+        try await fetchJSON(url: url, additionalHeaders: [:])
+    }
+
+    public func fetchJSON(url: URL, additionalHeaders: [String: String]) async throws -> Any {
+        let data = try await fetchData(
+            url: url,
+            accept: "application/json,text/plain,*/*",
+            additionalHeaders: additionalHeaders
+        )
         do {
             return try JSONSerialization.jsonObject(with: data)
         } catch {
@@ -51,7 +62,11 @@ public final class PublicWebFetcher: @unchecked Sendable {
         await warmupGate.markWarmup()
     }
 
-    private func fetchData(url: URL, accept: String) async throws -> Data {
+    private func fetchData(
+        url: URL,
+        accept: String,
+        additionalHeaders: [String: String] = [:]
+    ) async throws -> Data {
         guard let host = url.host?.lowercased() else {
             throw BiliClientError.invalidInput("URL 缺少 host")
         }
@@ -70,6 +85,9 @@ public final class PublicWebFetcher: @unchecked Sendable {
         request.setValue("keep-alive", forHTTPHeaderField: "Connection")
         if let sessdata = normalizedSessdataFromDefaults() {
             request.setValue("SESSDATA=\(sessdata)", forHTTPHeaderField: "Cookie")
+        }
+        for (field, value) in additionalHeaders {
+            request.setValue(value, forHTTPHeaderField: field)
         }
 
         var lastError: Error?

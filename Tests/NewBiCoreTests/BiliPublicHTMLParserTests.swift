@@ -82,7 +82,7 @@ final class BiliPublicHTMLParserTests: XCTestCase {
         let html = try loadFixture("play_page")
         let stream = try parser.parsePlayableStream(from: html)
 
-        guard case .progressive(let url) = stream.transport else {
+        guard case .progressive(let url, _) = stream.transport else {
             return XCTFail("expected progressive transport")
         }
         XCTAssertEqual(url.absoluteString, "https://example.com/video-720.mp4")
@@ -94,19 +94,19 @@ final class BiliPublicHTMLParserTests: XCTestCase {
         let html = try loadFixture("play_page_no_durl")
         let stream = try parser.parsePlayableStream(from: html)
 
-        guard case .dash(let videoURL, let audioURL) = stream.transport else {
+        guard case .dash(let videoURL, let audioURL, _, _) = stream.transport else {
             return XCTFail("expected dash transport")
         }
 
         XCTAssertEqual(videoURL.absoluteString, "https://example.com/video-avc.m4s")
-        XCTAssertEqual(audioURL?.absoluteString, "https://example.com/audio-hi.m4s")
+        XCTAssertEqual(audioURL?.absoluteString, "https://example.com/audio-aac.m4s")
     }
 
     func testParsePlayableStreamDashWithoutAudioDoesNotThrow() throws {
         let html = try loadFixture("play_page_dash_no_audio")
         let stream = try parser.parsePlayableStream(from: html)
 
-        guard case .dash(let videoURL, let audioURL) = stream.transport else {
+        guard case .dash(let videoURL, let audioURL, _, _) = stream.transport else {
             return XCTFail("expected dash transport")
         }
 
@@ -118,7 +118,7 @@ final class BiliPublicHTMLParserTests: XCTestCase {
         let html = try loadFixture("play_page_dash_backup")
         let stream = try parser.parsePlayableStream(from: html)
 
-        guard case .dash(let videoURL, let audioURL) = stream.transport else {
+        guard case .dash(let videoURL, let audioURL, _, _) = stream.transport else {
             return XCTFail("expected dash transport")
         }
 
@@ -126,11 +126,31 @@ final class BiliPublicHTMLParserTests: XCTestCase {
         XCTAssertEqual(audioURL?.absoluteString, "https://example.com/audio-backup.m4s")
     }
 
+    func testParsePlayableStreamDashPrefersPrimaryURLWhenAvailable() throws {
+        let html = """
+        <!doctype html>
+        <html><body><script>
+        window.__playinfo__={"data":{"quality":80,"accept_quality":[80],"accept_description":["1080P"],"dash":{"video":[{"id":80,"baseUrl":"https://example.com/video-primary.m4s","backupUrl":["https://example.com/video-backup.m4s"],"codecs":"avc1.640028"}],"audio":[{"baseUrl":"https://example.com/audio-primary.m4s","backupUrl":["https://example.com/audio-backup.m4s"],"codecs":"mp4a.40.2"}]}}};
+        </script></body></html>
+        """
+
+        let stream = try parser.parsePlayableStream(from: html)
+
+        guard case .dash(let videoURL, let audioURL, let videoFallbacks, let audioFallbacks) = stream.transport else {
+            return XCTFail("expected dash transport")
+        }
+
+        XCTAssertEqual(videoURL.absoluteString, "https://example.com/video-primary.m4s")
+        XCTAssertEqual(audioURL?.absoluteString, "https://example.com/audio-primary.m4s")
+        XCTAssertEqual(videoFallbacks.first?.absoluteString, "https://example.com/video-backup.m4s")
+        XCTAssertEqual(audioFallbacks.first?.absoluteString, "https://example.com/audio-backup.m4s")
+    }
+
     func testParsePlayableStreamDashFallsBackToHighestQuality() throws {
         let html = try loadFixture("play_page_dash_preferred_missing")
         let stream = try parser.parsePlayableStream(from: html)
 
-        guard case .dash(let videoURL, _) = stream.transport else {
+        guard case .dash(let videoURL, _, _, _) = stream.transport else {
             return XCTFail("expected dash transport")
         }
 

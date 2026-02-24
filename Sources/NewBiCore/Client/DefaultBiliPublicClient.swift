@@ -138,8 +138,155 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
             throw BiliClientError.invalidInput("播放参数无效")
         }
 
-        let html = try await fetcher.fetchHTML(url: url)
-        return try parser.parsePlayableStream(from: html)
+        do {
+            let html = try await fetcher.fetchHTML(url: url)
+            let parsed = applyPlaybackHeaders(
+                to: try parser.parsePlayableStream(from: html),
+                bvid: bvid
+            )
+
+            if case .dash = parsed.transport {
+                if let progressive = try? await resolvePlayableStreamViaPublicAPI(
+                    bvid: bvid,
+                    cid: cid,
+                    preferProgressive: true
+                ) {
+                    return progressive
+                }
+            }
+
+            if case .progressive = parsed.transport, !isNativeFriendlyProgressive(parsed) {
+                // Some public videos only expose FLV in durl; prefer DASH to avoid AVFoundation -11828.
+                return try await resolvePlayableStreamViaPublicAPI(
+                    bvid: bvid,
+                    cid: cid,
+                    preferProgressive: false
+                )
+            }
+
+            return parsed
+        } catch {
+            return try await resolvePlayableStreamViaPublicAPI(
+                bvid: bvid,
+                cid: cid,
+                preferProgressive: true
+            )
+        }
+    }
+
+    private func resolvePlayableStreamViaPublicAPI(
+        bvid: String,
+        cid: Int?,
+        preferProgressive: Bool
+    ) async throws -> PlayableStream {
+        let resolvedCID = try await resolveCIDForPlayback(bvid: bvid, cid: cid)
+
+        if preferProgressive {
+            if let progressive = try? await fetchPlayableStreamFromPlayurlAPI(
+                bvid: bvid,
+                cid: resolvedCID,
+                fnval: "0"
+            ) {
+                let normalized = applyPlaybackHeaders(to: progressive, bvid: bvid)
+                if isNativeFriendlyProgressive(normalized) {
+                    return normalized
+                }
+            }
+        }
+
+        return applyPlaybackHeaders(
+            to: try await fetchPlayableStreamFromPlayurlAPI(
+                bvid: bvid,
+                cid: resolvedCID,
+                fnval: "16"
+            ),
+            bvid: bvid
+        )
+    }
+
+    private func fetchPlayableStreamFromPlayurlAPI(
+        bvid: String,
+        cid: Int,
+        fnval: String
+    ) async throws -> PlayableStream {
+        var components = URLComponents(string: "https://api.bilibili.com/x/player/playurl")
+        components?.queryItems = [
+            URLQueryItem(name: "bvid", value: bvid),
+            URLQueryItem(name: "cid", value: String(cid)),
+            URLQueryItem(name: "qn", value: "80"),
+            URLQueryItem(name: "fnver", value: "0"),
+            URLQueryItem(name: "fnval", value: fnval),
+            URLQueryItem(name: "fourk", value: "1")
+        ]
+        guard let apiURL = components?.url else {
+            throw BiliClientError.invalidInput("播放回退参数无效")
+        }
+
+        let headers = [
+            "Referer": "https://www.bilibili.com/video/\(bvid)",
+            "Origin": "https://www.bilibili.com"
+        ]
+
+        do {
+            let json = try await fetcher.fetchJSON(url: apiURL, additionalHeaders: headers)
+            return try parser.parsePlayableStream(fromPlayInfoJSON: json)
+        } catch {
+            guard isRateLimitedError(error) else {
+                throw error
+            }
+
+            await fetcher.primeBilibiliCookiesIfNeeded()
+            let retriedJSON = try await fetcher.fetchJSON(url: apiURL, additionalHeaders: headers)
+            return try parser.parsePlayableStream(fromPlayInfoJSON: retriedJSON)
+        }
+    }
+
+    private func resolveCIDForPlayback(bvid: String, cid: Int?) async throws -> Int {
+        if let cid {
+            return cid
+        }
+
+        let detail = try await fetchVideoDetail(bvid: bvid)
+        if let first = detail.parts.first?.cid {
+            return first
+        }
+
+        throw BiliClientError.parseFailed("未找到视频 cid")
+    }
+
+    private func applyPlaybackHeaders(to stream: PlayableStream, bvid: String) -> PlayableStream {
+        PlayableStream(
+            transport: stream.transport,
+            headers: makePlaybackHeaders(for: bvid),
+            qualityLabel: stream.qualityLabel,
+            format: stream.format
+        )
+    }
+
+    private func makePlaybackHeaders(for bvid: String) -> PlaybackHeaders {
+        PlaybackHeaders(
+            referer: "https://www.bilibili.com/video/\(bvid)",
+            origin: "https://www.bilibili.com",
+            userAgent: PlaybackHeaders.bilibiliDefault.userAgent
+        )
+    }
+
+    private func isNativeFriendlyProgressive(_ stream: PlayableStream) -> Bool {
+        guard case .progressive(let url, _) = stream.transport else {
+            return true
+        }
+
+        let format = stream.format.lowercased()
+        if format.contains("flv") {
+            return false
+        }
+
+        let ext = url.pathExtension.lowercased()
+        if ext == "flv" || ext == "f4v" {
+            return false
+        }
+
+        return true
     }
 
     private func fetchSubscriptionVideosFromSpaceArcAPI(uid: String) async throws -> [VideoCard] {

@@ -84,7 +84,16 @@ public struct BiliPublicHTMLParser: Sendable {
         }
 
         let decoded = try ScriptJSONExtractor.decodeJSONObject(from: object)
-        let root = JSONHelpers.dict(decoded) ?? [:]
+        return try parsePlayableStream(fromPlayInfoJSON: decoded)
+    }
+
+    public func parsePlayableStream(fromPlayInfoJSON rootObject: Any) throws -> PlayableStream {
+        let root = JSONHelpers.dict(rootObject) ?? [:]
+        if let code = JSONHelpers.int(root["code"]), code != 0 {
+            let message = JSONHelpers.string(root["message"]) ?? JSONHelpers.string(root["msg"]) ?? "未知错误"
+            throw BiliClientError.networkFailed("播放接口异常(code=\(code))：\(message)")
+        }
+
         let data = JSONHelpers.dict(root["data"]) ?? root
 
         if let progressive = parseProgressiveStream(data: data) {
@@ -251,15 +260,7 @@ public struct BiliPublicHTMLParser: Sendable {
     }
 
     private func normalizeImageURL(_ text: String?) -> URL? {
-        guard var text else {
-            return nil
-        }
-
-        if text.hasPrefix("//") {
-            text = "https:\(text)"
-        }
-
-        return URL(string: text)
+        normalizeNetworkURL(text)
     }
 
     private func formatDuration(_ seconds: Int?) -> String? {
@@ -275,16 +276,19 @@ public struct BiliPublicHTMLParser: Sendable {
     private func parseProgressiveStream(data: [String: Any]) -> PlayableStream? {
         let durl = JSONHelpers.array(data["durl"]) ?? []
         guard let first = durl.first,
-              let firstDict = JSONHelpers.dict(first),
-              let url = firstURL(from: firstDict)
+              let firstDict = JSONHelpers.dict(first)
         else {
+            return nil
+        }
+        let candidates = urlCandidates(from: firstDict)
+        guard let url = candidates.first else {
             return nil
         }
 
         let format = JSONHelpers.string(data["format"]) ?? inferFormat(from: url)
         let qualityLabel = resolveQualityLabel(data: data, fallbackQuality: nil)
         return PlayableStream(
-            transport: .progressive(url: url),
+            transport: .progressive(url: url, fallbackURLs: Array(candidates.dropFirst())),
             headers: .bilibiliDefault,
             qualityLabel: qualityLabel,
             format: format
@@ -299,15 +303,19 @@ public struct BiliPublicHTMLParser: Sendable {
         let rawVideos = JSONHelpers.array(dash["video"]) ?? []
         let videoTracks = rawVideos.compactMap { raw -> DashVideoTrack? in
             guard let dict = JSONHelpers.dict(raw),
-                  let id = JSONHelpers.int(dict["id"]),
-                  let url = firstURL(from: dict)
+                  let id = JSONHelpers.int(dict["id"])
             else {
+                return nil
+            }
+            let candidates = urlCandidates(from: dict)
+            guard let firstURL = candidates.first else {
                 return nil
             }
 
             return DashVideoTrack(
                 id: id,
-                url: url,
+                url: firstURL,
+                fallbackURLs: Array(candidates.dropFirst()),
                 codecs: JSONHelpers.string(dict["codecs"]),
                 bandwidth: JSONHelpers.int(dict["bandwidth"])
             )
@@ -320,65 +328,153 @@ public struct BiliPublicHTMLParser: Sendable {
         let preferredQuality = JSONHelpers.int(data["quality"])
         let selectedVideo = selectBestVideoTrack(videoTracks, preferredQuality: preferredQuality)
 
-        let rawAudios = JSONHelpers.array(dash["audio"]) ?? []
-        let audioTracks = rawAudios.compactMap { raw -> DashAudioTrack? in
-            guard let dict = JSONHelpers.dict(raw),
-                  let url = firstURL(from: dict)
-            else {
-                return nil
+        var audioTracks = parseDashAudioTracks(from: JSONHelpers.array(dash["audio"]) ?? [])
+        if let flac = JSONHelpers.dict(dash["flac"]),
+           let flacAudio = JSONHelpers.dict(flac["audio"])
+        {
+            audioTracks += parseDashAudioTracks(from: [flacAudio])
+        }
+        if let dolby = JSONHelpers.dict(dash["dolby"]) {
+            if let dolbyAudios = JSONHelpers.array(dolby["audio"]) {
+                audioTracks += parseDashAudioTracks(from: dolbyAudios)
+            } else if let dolbyAudio = JSONHelpers.dict(dolby["audio"]) {
+                audioTracks += parseDashAudioTracks(from: [dolbyAudio])
             }
+        }
 
-            return DashAudioTrack(
-                url: url,
-                bandwidth: JSONHelpers.int(dict["bandwidth"])
-            )
-        }
-        let selectedAudio = audioTracks.max { lhs, rhs in
-            (lhs.bandwidth ?? 0) < (rhs.bandwidth ?? 0)
-        }
+        let selectedAudio = selectBestAudioTrack(audioTracks)
 
         var displayData = data
         displayData["quality"] = selectedVideo.id
 
         return PlayableStream(
-            transport: .dash(videoURL: selectedVideo.url, audioURL: selectedAudio?.url),
+            transport: .dash(
+                videoURL: selectedVideo.url,
+                audioURL: selectedAudio?.url,
+                videoFallbackURLs: selectedVideo.fallbackURLs,
+                audioFallbackURLs: selectedAudio?.fallbackURLs ?? []
+            ),
             headers: .bilibiliDefault,
             qualityLabel: resolveQualityLabel(data: displayData, fallbackQuality: selectedVideo.id),
             format: JSONHelpers.string(data["format"]) ?? "dash"
         )
     }
 
-    private func firstURL(from dict: [String: Any]) -> URL? {
-        let directCandidates = [
+    private func parseDashAudioTracks(from rawTracks: [Any]) -> [DashAudioTrack] {
+        rawTracks.compactMap { raw -> DashAudioTrack? in
+            guard let dict = JSONHelpers.dict(raw)
+            else {
+                return nil
+            }
+            let candidates = urlCandidates(from: dict)
+            guard let firstURL = candidates.first else {
+                return nil
+            }
+
+            return DashAudioTrack(
+                url: firstURL,
+                fallbackURLs: Array(candidates.dropFirst()),
+                codecs: JSONHelpers.string(dict["codecs"]),
+                id: JSONHelpers.int(dict["id"]),
+                bandwidth: JSONHelpers.int(dict["bandwidth"])
+            )
+        }
+    }
+
+    private func selectBestAudioTrack(_ tracks: [DashAudioTrack]) -> DashAudioTrack? {
+        tracks.sorted { lhs, rhs in
+            let lhsCodec = audioCodecRank(lhs.codecs)
+            let rhsCodec = audioCodecRank(rhs.codecs)
+            if lhsCodec != rhsCodec {
+                return lhsCodec < rhsCodec
+            }
+            if lhs.bandwidth != rhs.bandwidth {
+                return (lhs.bandwidth ?? 0) > (rhs.bandwidth ?? 0)
+            }
+            return (lhs.id ?? 0) > (rhs.id ?? 0)
+        }.first
+    }
+
+    private func audioCodecRank(_ codec: String?) -> Int {
+        guard let codec = codec?.lowercased() else {
+            return 3
+        }
+        if codec.contains("mp4a") || codec.contains("aac") {
+            return 0
+        }
+        if codec.contains("opus") {
+            return 1
+        }
+        if codec.contains("ac-3") || codec.contains("ec-3") || codec.contains("flac") {
+            return 2
+        }
+        return 3
+    }
+
+    private func urlCandidates(from dict: [String: Any], preferBackup: Bool = false) -> [URL] {
+        let directCandidates: [String?] = [
             JSONHelpers.string(dict["url"]),
             JSONHelpers.string(dict["baseUrl"]),
             JSONHelpers.string(dict["base_url"])
         ]
-        for text in directCandidates {
-            if let text, let url = URL(string: text) {
-                return url
-            }
-        }
 
         let backupArray = (JSONHelpers.array(dict["backupUrl"]) ?? JSONHelpers.array(dict["backup_url"]) ?? [])
             .compactMap(JSONHelpers.string)
-        for text in backupArray {
-            if let url = URL(string: text) {
-                return url
-            }
-        }
-
-        let backupSingle = [
+        let backupSingle: [String?] = [
             JSONHelpers.string(dict["backupUrl"]),
             JSONHelpers.string(dict["backup_url"])
         ]
-        for text in backupSingle {
-            if let text, let url = URL(string: text) {
-                return url
+
+        let orderedCandidates: [String?]
+        if preferBackup {
+            orderedCandidates = backupArray.map(Optional.some) + backupSingle + directCandidates
+        } else {
+            orderedCandidates = directCandidates + backupArray.map(Optional.some) + backupSingle
+        }
+
+        var seen = Set<String>()
+        var urls: [URL] = []
+        for text in orderedCandidates {
+            guard let text else {
+                continue
+            }
+            guard seen.insert(text).inserted else {
+                continue
+            }
+            if let url = normalizeNetworkURL(text) {
+                urls.append(url)
             }
         }
 
-        return nil
+        return urls
+    }
+
+    private func normalizeNetworkURL(_ text: String?) -> URL? {
+        guard var text = text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+            return nil
+        }
+
+        if text.hasPrefix("//") {
+            text = "https:\(text)"
+        }
+
+        guard let url = URL(string: text) else {
+            return nil
+        }
+
+        if let scheme = url.scheme?.lowercased(), scheme == "https" {
+            return url
+        }
+
+        if let scheme = url.scheme?.lowercased(), scheme == "http" {
+            var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            components?.scheme = "https"
+            if let upgraded = components?.url {
+                return upgraded
+            }
+        }
+
+        return url
     }
 
     private func selectBestVideoTrack(_ tracks: [DashVideoTrack], preferredQuality: Int?) -> DashVideoTrack {
@@ -447,12 +543,16 @@ public struct BiliPublicHTMLParser: Sendable {
     private struct DashVideoTrack {
         let id: Int
         let url: URL
+        let fallbackURLs: [URL]
         let codecs: String?
         let bandwidth: Int?
     }
 
     private struct DashAudioTrack {
         let url: URL
+        let fallbackURLs: [URL]
+        let codecs: String?
+        let id: Int?
         let bandwidth: Int?
     }
 

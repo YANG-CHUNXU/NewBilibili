@@ -117,8 +117,13 @@ public struct PlaybackHeaders: Hashable, Sendable {
 }
 
 public enum PlayTransport: Hashable, Sendable {
-    case progressive(url: URL)
-    case dash(videoURL: URL, audioURL: URL?)
+    case progressive(url: URL, fallbackURLs: [URL] = [])
+    case dash(
+        videoURL: URL,
+        audioURL: URL?,
+        videoFallbackURLs: [URL] = [],
+        audioFallbackURLs: [URL] = []
+    )
 }
 
 public struct PlayableStream: Hashable, Sendable {

@@ -140,17 +140,17 @@ final class NativePlaybackResourceLoader: NSObject {
                 let text = makeMediaPlaylist(sessionID: route.sessionID, segmentPath: "/audio.segment")
                 try respondText(text, contentType: UTType.m3uPlaylist.identifier, to: loadingRequest)
             case .progressiveSegment:
-                guard case .progressive(let remoteURL) = session.stream.transport else {
+                guard case .progressive(let remoteURL, _) = session.stream.transport else {
                     throw BiliClientError.unsupportedDashStream("会话并非 progressive 流")
                 }
                 try await proxyRemote(remoteURL, headers: session.stream.headers, to: loadingRequest)
             case .videoSegment:
-                guard case .dash(let videoURL, _) = session.stream.transport else {
+                guard case .dash(let videoURL, _, _, _) = session.stream.transport else {
                     throw BiliClientError.unsupportedDashStream("会话并非 DASH 流")
                 }
                 try await proxyRemote(videoURL, headers: session.stream.headers, to: loadingRequest)
             case .audioSegment:
-                guard case .dash(_, let audioURL) = session.stream.transport else {
+                guard case .dash(_, let audioURL, _, _) = session.stream.transport else {
                     throw BiliClientError.unsupportedDashStream("会话并非 DASH 流")
                 }
                 guard let audioURL else {
@@ -167,7 +167,7 @@ final class NativePlaybackResourceLoader: NSObject {
         switch stream.transport {
         case .progressive:
             throw BiliClientError.playbackProxyFailed("progressive 不需要 master 清单")
-        case .dash(_, let audioURL):
+        case .dash(_, let audioURL, _, _):
             guard let playlist = NativePlaybackProxyUtilities.makeMasterPlaylist(
                 scheme: Self.proxyScheme,
                 sessionID: sessionID,
