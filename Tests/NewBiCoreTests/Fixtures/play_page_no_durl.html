@@ -5,14 +5,32 @@
 window.__playinfo__={
   "data": {
     "quality": 80,
-    "accept_quality": [80],
+    "accept_quality": [80,64],
     "accept_description": ["高清 1080P"],
     "dash": {
       "video": [
-        {"baseUrl": "https://example.com/video.m4s"}
+        {
+          "id": 80,
+          "codecs": "hev1.1.6.L123.B0",
+          "bandwidth": 2500000,
+          "baseUrl": "https://example.com/video-hevc.m4s"
+        },
+        {
+          "id": 80,
+          "codecs": "avc1.640028",
+          "bandwidth": 1900000,
+          "baseUrl": "https://example.com/video-avc.m4s"
+        },
+        {
+          "id": 64,
+          "codecs": "avc1.640020",
+          "bandwidth": 1200000,
+          "baseUrl": "https://example.com/video-720.m4s"
+        }
       ],
       "audio": [
-        {"baseUrl": "https://example.com/audio.m4s"}
+        {"baseUrl": "https://example.com/audio-low.m4s", "bandwidth": 64000},
+        {"baseUrl": "https://example.com/audio-hi.m4s", "bandwidth": 192000}
       ]
     }
   }

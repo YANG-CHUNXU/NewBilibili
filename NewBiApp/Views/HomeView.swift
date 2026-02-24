@@ -5,15 +5,18 @@ struct HomeView: View {
     @StateObject private var viewModel: HomeFeedViewModel
     private let biliClient: any BiliPublicClient
     private let historyRepository: any WatchHistoryRepository
+    private let playbackItemFactory: any PlaybackItemFactoryProtocol
 
     init(
         viewModel: HomeFeedViewModel,
         biliClient: any BiliPublicClient,
-        historyRepository: any WatchHistoryRepository
+        historyRepository: any WatchHistoryRepository,
+        playbackItemFactory: any PlaybackItemFactoryProtocol
     ) {
         _viewModel = StateObject(wrappedValue: viewModel)
         self.biliClient = biliClient
         self.historyRepository = historyRepository
+        self.playbackItemFactory = playbackItemFactory
     }
 
     var body: some View {
@@ -39,7 +42,8 @@ struct HomeView: View {
                             bvid: video.bvid,
                             initialTitle: video.title,
                             biliClient: biliClient,
-                            historyRepository: historyRepository
+                            historyRepository: historyRepository,
+                            playbackItemFactory: playbackItemFactory
                         )
                     } label: {
                         VideoCardRow(video: video)

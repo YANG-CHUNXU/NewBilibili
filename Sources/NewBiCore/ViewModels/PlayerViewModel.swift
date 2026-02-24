@@ -51,4 +51,12 @@ public final class PlayerViewModel: ObservableObject {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
     }
+
+    public func reportPlaybackError(_ error: Error) {
+        errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+    }
+
+    public func reportPlaybackError(message: String) {
+        errorMessage = message
+    }
 }

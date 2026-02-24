@@ -13,7 +13,8 @@ struct ContentView: View {
                         biliClient: environment.biliClient
                     ),
                     biliClient: environment.biliClient,
-                    historyRepository: environment.watchHistoryRepository
+                    historyRepository: environment.watchHistoryRepository,
+                    playbackItemFactory: environment.playbackItemFactory
                 )
             }
             .tabItem {
@@ -24,7 +25,8 @@ struct ContentView: View {
                 SearchView(
                     viewModel: SearchViewModel(biliClient: environment.biliClient),
                     biliClient: environment.biliClient,
-                    historyRepository: environment.watchHistoryRepository
+                    historyRepository: environment.watchHistoryRepository,
+                    playbackItemFactory: environment.playbackItemFactory
                 )
             }
             .tabItem {

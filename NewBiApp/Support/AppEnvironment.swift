@@ -10,12 +10,14 @@ final class AppEnvironment: ObservableObject {
     let biliClient: any BiliPublicClient
     let subscriptionRepository: any SubscriptionRepository
     let watchHistoryRepository: any WatchHistoryRepository
+    let playbackItemFactory: any PlaybackItemFactoryProtocol
     #if canImport(SwiftData)
     private var modelContainerBox: Any?
     #endif
 
     init() {
         self.biliClient = DefaultBiliPublicClient()
+        self.playbackItemFactory = PlaybackItemFactory()
 
         let appSupportURL = Self.resolveAppSupportDirectory()
         try? FileManager.default.createDirectory(at: appSupportURL, withIntermediateDirectories: true)

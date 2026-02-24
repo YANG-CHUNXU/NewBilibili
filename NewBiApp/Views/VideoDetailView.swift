@@ -6,17 +6,20 @@ struct VideoDetailView: View {
     private let initialTitle: String
     private let biliClient: any BiliPublicClient
     private let historyRepository: any WatchHistoryRepository
+    private let playbackItemFactory: any PlaybackItemFactoryProtocol
 
     init(
         bvid: String,
         initialTitle: String,
         biliClient: any BiliPublicClient,
-        historyRepository: any WatchHistoryRepository
+        historyRepository: any WatchHistoryRepository,
+        playbackItemFactory: any PlaybackItemFactoryProtocol
     ) {
         _viewModel = StateObject(wrappedValue: VideoDetailViewModel(bvid: bvid, biliClient: biliClient))
         self.initialTitle = initialTitle
         self.biliClient = biliClient
         self.historyRepository = historyRepository
+        self.playbackItemFactory = playbackItemFactory
     }
 
     var body: some View {
@@ -64,7 +67,8 @@ struct VideoDetailView: View {
                                 cid: nil,
                                 title: detail.title,
                                 biliClient: biliClient,
-                                historyRepository: historyRepository
+                                historyRepository: historyRepository,
+                                playbackItemFactory: playbackItemFactory
                             )
                         }
                     } else {
@@ -75,7 +79,8 @@ struct VideoDetailView: View {
                                     cid: part.cid,
                                     title: "\(detail.title) - \(part.title)",
                                     biliClient: biliClient,
-                                    historyRepository: historyRepository
+                                    historyRepository: historyRepository,
+                                    playbackItemFactory: playbackItemFactory
                                 )
                             } label: {
                                 HStack {

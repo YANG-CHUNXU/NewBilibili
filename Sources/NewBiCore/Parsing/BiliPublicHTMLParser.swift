@@ -268,10 +268,13 @@ public struct BiliPublicHTMLParser: Sendable {
             (lhs.bandwidth ?? 0) < (rhs.bandwidth ?? 0)
         }
 
+        var displayData = data
+        displayData["quality"] = selectedVideo.id
+
         return PlayableStream(
             transport: .dash(videoURL: selectedVideo.url, audioURL: selectedAudio?.url),
             headers: .bilibiliDefault,
-            qualityLabel: resolveQualityLabel(data: data, fallbackQuality: selectedVideo.id),
+            qualityLabel: resolveQualityLabel(data: displayData, fallbackQuality: selectedVideo.id),
             format: JSONHelpers.string(data["format"]) ?? "dash"
         )
     }
