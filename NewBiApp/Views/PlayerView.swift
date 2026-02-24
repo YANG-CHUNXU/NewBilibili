@@ -80,7 +80,7 @@ struct PlayerView: View {
             player.replaceCurrentItem(with: item)
             player.play()
         } catch {
-            viewModel.reportPlaybackError(error)
+            viewModel.reportPlaybackError(describePlaybackError(error))
         }
     }
 
@@ -95,7 +95,7 @@ struct PlayerView: View {
             }
             let err = observedItem.error ?? BiliClientError.playbackProxyFailed("播放器加载失败")
             Task { @MainActor in
-                model.reportPlaybackError(err)
+                model.reportPlaybackError(self.describePlaybackError(err))
             }
         }
 
@@ -107,9 +107,19 @@ struct PlayerView: View {
             let err = (notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error) ??
                 BiliClientError.playbackProxyFailed("播放中断")
             Task { @MainActor in
-                model.reportPlaybackError(err)
+                model.reportPlaybackError(self.describePlaybackError(err))
             }
         }
+    }
+
+    private func describePlaybackError(_ error: Error) -> Error {
+        let nsError = error as NSError
+        if nsError.domain == "CoreMediaErrorDomain", nsError.code == -12881 {
+            return BiliClientError.playbackProxyFailed(
+                "视频资源加载失败（CoreMedia -12881）。请返回后重试，若仍失败请更换视频测试。"
+            )
+        }
+        return error
     }
 
     @MainActor
