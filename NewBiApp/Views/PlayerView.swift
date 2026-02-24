@@ -8,6 +8,8 @@ struct PlayerView: View {
     @State private var player = AVPlayer()
     @State private var statusObserver: NSKeyValueObservation?
     @State private var failedToEndObserver: NSObjectProtocol?
+    @State private var isViewVisible = false
+    @State private var activePlaybackSessionID = UUID()
     @State private var didRetryPlayback = false
     @State private var isRetryingPlayback = false
     @State private var lastAttemptedStream: PlayableStream?
@@ -63,7 +65,8 @@ struct PlayerView: View {
                 VideoPlayer(player: player)
                     .frame(minHeight: 220)
                     .task(id: stream) {
-                        await preparePlayback(for: stream)
+                        let sessionID = beginPlaybackSession()
+                        await preparePlayback(for: stream, sessionID: sessionID)
                     }
                 Text("清晰度: \(stream.qualityLabel) | 格式: \(stream.format)")
                     .font(.caption)
@@ -83,7 +86,12 @@ struct PlayerView: View {
         .task {
             await viewModel.load()
         }
+        .onAppear {
+            isViewVisible = true
+        }
         .onDisappear {
+            isViewVisible = false
+            invalidatePlaybackSession()
             let seconds = player.currentTime().seconds
             Task {
                 await viewModel.recordPlayback(progressSeconds: seconds.isFinite ? seconds : 0)
@@ -92,23 +100,45 @@ struct PlayerView: View {
         }
     }
 
+    private func beginPlaybackSession() -> UUID {
+        let sessionID = UUID()
+        activePlaybackSessionID = sessionID
+        return sessionID
+    }
+
+    private func invalidatePlaybackSession() {
+        activePlaybackSessionID = UUID()
+    }
+
+    private func shouldHandlePlaybackResult(for sessionID: UUID) -> Bool {
+        !Task.isCancelled && isViewVisible && activePlaybackSessionID == sessionID
+    }
+
     @MainActor
-    private func preparePlayback(for stream: PlayableStream) async {
+    private func preparePlayback(for stream: PlayableStream, sessionID: UUID) async {
         do {
             configureAudioSessionForPlayback()
             lastAttemptedStream = stream
             let item = try await playbackItemFactory.makePlayerItem(from: stream)
-            bindFailureObservers(to: item)
+            guard shouldHandlePlaybackResult(for: sessionID) else {
+                playbackItemFactory.releaseResources(for: item)
+                return
+            }
+            bindFailureObservers(to: item, sessionID: sessionID)
+            player.pause()
             playbackItemFactory.releaseResources(for: player.currentItem)
             player.replaceCurrentItem(with: item)
             player.play()
         } catch {
-            await handlePlaybackFailure(error)
+            guard shouldHandlePlaybackResult(for: sessionID) else {
+                return
+            }
+            await handlePlaybackFailure(error, sessionID: sessionID)
         }
     }
 
     @MainActor
-    private func bindFailureObservers(to item: AVPlayerItem) {
+    private func bindFailureObservers(to item: AVPlayerItem, sessionID: UUID) {
         clearObservers()
         statusObserver = item.observe(\.status, options: [.new]) { observedItem, _ in
             guard observedItem.status == .failed else {
@@ -116,7 +146,7 @@ struct PlayerView: View {
             }
             let err = observedItem.error ?? BiliClientError.playbackProxyFailed("播放器加载失败")
             Task { @MainActor in
-                await self.handlePlaybackFailure(err)
+                await self.handlePlaybackFailure(err, sessionID: sessionID)
             }
         }
 
@@ -128,19 +158,28 @@ struct PlayerView: View {
             let err = (notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error) ??
                 BiliClientError.playbackProxyFailed("播放中断")
             Task { @MainActor in
-                await self.handlePlaybackFailure(err)
+                await self.handlePlaybackFailure(err, sessionID: sessionID)
             }
         }
     }
 
     @MainActor
-    private func handlePlaybackFailure(_ error: Error) async {
+    private func handlePlaybackFailure(_ error: Error, sessionID: UUID) async {
+        guard shouldHandlePlaybackResult(for: sessionID) else {
+            return
+        }
+
         if !didRetryPlayback, !isRetryingPlayback {
             didRetryPlayback = true
             isRetryingPlayback = true
             await viewModel.load()
+            guard shouldHandlePlaybackResult(for: sessionID) else {
+                isRetryingPlayback = false
+                return
+            }
             if let stream = viewModel.stream {
-                await preparePlayback(for: makeRetryStream(from: stream))
+                let retrySessionID = beginPlaybackSession()
+                await preparePlayback(for: makeRetryStream(from: stream), sessionID: retrySessionID)
             } else {
                 let diagnostic = makePlaybackDiagnostic(from: error)
                 logPlaybackDiagnostic(diagnostic)
