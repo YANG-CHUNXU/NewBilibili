@@ -2,8 +2,6 @@
 
 一个面向 iOS 的 B 站第三方客户端 MVP，目标是验证「公开页面解析 + 原生播放器」这条最小可行链路。
 
-![NewBi Screenshot](screenshot.png)
-
 ## 特性
 
 - iOS 16+，SwiftUI + MVVM 架构。
