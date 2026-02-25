@@ -27,37 +27,65 @@ enum BiliCookieImportError: LocalizedError {
 final class BiliCookieStore {
     private let userDefaults: UserDefaults
     private let cookieStorage: HTTPCookieStorage
+    private let keychainStore: SessdataKeychainStore
 
     private let sessdataKey = "newbi.bilibili.sessdata"
     private let updatedAtKey = "newbi.bilibili.cookie.updatedAt"
 
     init(
         userDefaults: UserDefaults = .standard,
-        cookieStorage: HTTPCookieStorage = .shared
+        cookieStorage: HTTPCookieStorage = .shared,
+        keychainStore: SessdataKeychainStore
     ) {
         self.userDefaults = userDefaults
         self.cookieStorage = cookieStorage
+        self.keychainStore = keychainStore
     }
 
     func restoreFromPersistedSessdata() -> BiliCookieStatus {
-        guard let sessdata = userDefaults.string(forKey: sessdataKey),
-              !sessdata.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if let keychainSessdata = keychainStore.readSessdata() {
+            do {
+                let sessdata = try normalizeSessdata(keychainSessdata)
+                userDefaults.removeObject(forKey: sessdataKey)
+                clearBilibiliCookiesFromStorage()
+                applySessdataCookie(sessdata)
+                let updatedAt = userDefaults.object(forKey: updatedAtKey) as? Date
+                return makeConfiguredStatus(updatedAt: updatedAt)
+            } catch {
+                try? keychainStore.deleteSessdata()
+                clearBilibiliCookiesFromStorage()
+                return BiliCookieStatus(isConfigured: false, summary: "未导入 SESSDATA")
+            }
+        }
+
+        guard let legacySessdata = userDefaults.string(forKey: sessdataKey),
+              !legacySessdata.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else {
             return BiliCookieStatus(isConfigured: false, summary: "未导入 SESSDATA")
         }
 
-        clearBilibiliCookiesFromStorage()
-        applySessdataCookie(sessdata)
-        let updatedAt = userDefaults.object(forKey: updatedAtKey) as? Date
-        return makeConfiguredStatus(updatedAt: updatedAt)
+        do {
+            let normalized = try normalizeSessdata(legacySessdata)
+            try keychainStore.saveSessdata(normalized)
+            userDefaults.removeObject(forKey: sessdataKey)
+            clearBilibiliCookiesFromStorage()
+            applySessdataCookie(normalized)
+            let updatedAt = userDefaults.object(forKey: updatedAtKey) as? Date
+            return makeConfiguredStatus(updatedAt: updatedAt)
+        } catch {
+            userDefaults.removeObject(forKey: sessdataKey)
+            clearBilibiliCookiesFromStorage()
+            return BiliCookieStatus(isConfigured: false, summary: "未导入 SESSDATA")
+        }
     }
 
     func importSessdata(_ raw: String) throws -> BiliCookieStatus {
         let sessdata = try normalizeSessdata(raw)
+        try keychainStore.saveSessdata(sessdata)
         clearBilibiliCookiesFromStorage()
         applySessdataCookie(sessdata)
 
-        userDefaults.set(sessdata, forKey: sessdataKey)
+        userDefaults.removeObject(forKey: sessdataKey)
         let now = Date()
         userDefaults.set(now, forKey: updatedAtKey)
         return makeConfiguredStatus(updatedAt: now)
@@ -66,6 +94,7 @@ final class BiliCookieStore {
     func clearPersistedCookies() -> BiliCookieStatus {
         userDefaults.removeObject(forKey: sessdataKey)
         userDefaults.removeObject(forKey: updatedAtKey)
+        try? keychainStore.deleteSessdata()
         clearBilibiliCookiesFromStorage()
         return BiliCookieStatus(isConfigured: false, summary: "未导入 SESSDATA")
     }
@@ -190,8 +219,13 @@ final class AppEnvironment: ObservableObject {
     #endif
 
     init() {
-        self.cookieStore = BiliCookieStore()
-        self.biliClient = DefaultBiliPublicClient()
+        let sessdataKeychainStore = SessdataKeychainStore()
+        self.cookieStore = BiliCookieStore(keychainStore: sessdataKeychainStore)
+        self.biliClient = DefaultBiliPublicClient(
+            fetcher: PublicWebFetcher(sessdataProvider: { [sessdataKeychainStore] in
+                sessdataKeychainStore.readSessdata()
+            })
+        )
         self.playbackItemFactory = PlaybackItemFactory()
 
         let appSupportURL = Self.resolveAppSupportDirectory()

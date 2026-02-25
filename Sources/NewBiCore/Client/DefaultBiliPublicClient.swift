@@ -145,7 +145,7 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
                 bvid: bvid
             )
 
-            if case .progressive = parsed.transport, !isNativeFriendlyProgressive(parsed) {
+            if isProgressiveLikeTransport(parsed.transport), !isNativeFriendlyProgressive(parsed) {
                 // Some public videos only expose FLV in durl; prefer DASH to avoid AVFoundation -11828.
                 return try await resolvePlayableStreamViaPublicAPI(
                     bvid: bvid,
@@ -274,8 +274,26 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
         )
     }
 
+    private func isProgressiveLikeTransport(_ transport: PlayTransport) -> Bool {
+        switch transport {
+        case .progressive, .progressivePlaylist:
+            return true
+        case .dash:
+            return false
+        }
+    }
+
     private func isNativeFriendlyProgressive(_ stream: PlayableStream) -> Bool {
-        guard case .progressive(let url, _) = stream.transport else {
+        let sampleURL: URL
+        switch stream.transport {
+        case .progressive(let url, _):
+            sampleURL = url
+        case .progressivePlaylist(let segments):
+            guard let first = segments.first else {
+                return false
+            }
+            sampleURL = first.url
+        case .dash:
             return true
         }
 
@@ -284,7 +302,7 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
             return false
         }
 
-        let ext = url.pathExtension.lowercased()
+        let ext = sampleURL.pathExtension.lowercased()
         if ext == "flv" || ext == "f4v" {
             return false
         }

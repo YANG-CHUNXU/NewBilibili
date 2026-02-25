@@ -1,6 +1,16 @@
 import Foundation
 
 public enum NativePlaybackProxyUtilities {
+    public struct MediaPlaylistSegment: Hashable, Sendable {
+        public let segmentPath: String
+        public let durationSeconds: Double?
+
+        public init(segmentPath: String, durationSeconds: Double? = nil) {
+            self.segmentPath = segmentPath
+            self.durationSeconds = durationSeconds
+        }
+    }
+
     public static func proxyURL(scheme: String, sessionID: UUID, path: String) -> URL? {
         var components = URLComponents()
         components.scheme = scheme
@@ -35,21 +45,53 @@ public enum NativePlaybackProxyUtilities {
     }
 
     public static func makeMediaPlaylist(scheme: String, sessionID: UUID, segmentPath: String) -> String? {
-        guard let segmentURL = proxyURL(scheme: scheme, sessionID: sessionID, path: segmentPath) else {
+        makeMediaPlaylist(
+            scheme: scheme,
+            sessionID: sessionID,
+            segments: [
+                MediaPlaylistSegment(
+                    segmentPath: segmentPath,
+                    durationSeconds: 86_400
+                )
+            ]
+        )
+    }
+
+    public static func makeMediaPlaylist(
+        scheme: String,
+        sessionID: UUID,
+        segments: [MediaPlaylistSegment]
+    ) -> String? {
+        guard !segments.isEmpty else {
             return nil
         }
 
-        return [
+        var playlistSegments: [(url: URL, durationSeconds: Double)] = []
+        for segment in segments {
+            guard let segmentURL = proxyURL(scheme: scheme, sessionID: sessionID, path: segment.segmentPath) else {
+                return nil
+            }
+            playlistSegments.append((segmentURL, normalizedSegmentDuration(segment.durationSeconds)))
+        }
+
+        let targetDuration = max(
+            Int(ceil(playlistSegments.map(\.durationSeconds).max() ?? 1)),
+            1
+        )
+
+        var lines = [
             "#EXTM3U",
             "#EXT-X-VERSION:7",
-            // Proxy serves one full media object as a single segment; use a large target duration
-            // to avoid HLS validation failures on long-form videos.
-            "#EXT-X-TARGETDURATION:86400",
-            "#EXT-X-PLAYLIST-TYPE:VOD",
-            "#EXTINF:86400.000,",
-            segmentURL.absoluteString,
-            "#EXT-X-ENDLIST"
-        ].joined(separator: "\n")
+            "#EXT-X-TARGETDURATION:\(targetDuration)",
+            "#EXT-X-PLAYLIST-TYPE:VOD"
+        ]
+
+        for segment in playlistSegments {
+            lines.append(String(format: "#EXTINF:%.3f,", segment.durationSeconds))
+            lines.append(segment.url.absoluteString)
+        }
+        lines.append("#EXT-X-ENDLIST")
+        return lines.joined(separator: "\n")
     }
 
     public static func makeRangeHeader(
@@ -78,5 +120,50 @@ public enum NativePlaybackProxyUtilities {
             headers["Range"] = range
         }
         return headers
+    }
+
+    public static func deduplicatedCandidateURLs(_ urls: [URL]) -> [URL] {
+        var seen = Set<String>()
+        var output: [URL] = []
+        output.reserveCapacity(urls.count)
+
+        for url in urls {
+            let key = url.absoluteString
+            guard seen.insert(key).inserted else {
+                continue
+            }
+            output.append(url)
+        }
+
+        return output
+    }
+
+    public static func prioritizedCandidateURLs(_ urls: [URL], preferred: URL?) -> [URL] {
+        var ordered = deduplicatedCandidateURLs(urls)
+        guard let preferred else {
+            return ordered
+        }
+
+        let preferredKey = preferred.absoluteString
+        guard let preferredIndex = ordered.firstIndex(where: { $0.absoluteString == preferredKey }) else {
+            return ordered
+        }
+        guard preferredIndex != ordered.startIndex else {
+            return ordered
+        }
+
+        let preferredURL = ordered.remove(at: preferredIndex)
+        ordered.insert(preferredURL, at: 0)
+        return ordered
+    }
+
+    private static func normalizedSegmentDuration(_ durationSeconds: Double?) -> Double {
+        guard let durationSeconds,
+              durationSeconds.isFinite,
+              durationSeconds > 0
+        else {
+            return 10
+        }
+        return durationSeconds
     }
 }

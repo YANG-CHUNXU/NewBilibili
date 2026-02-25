@@ -33,6 +33,25 @@ final class NativePlaybackResourceLoaderTests: XCTestCase {
         XCTAssertTrue(playlist.contains("newbi-proxy://f6d87659-63d8-4d64-b952-f4c2a9c52eb8/video.segment"))
     }
 
+    func testMediaPlaylistWithMultipleSegments() throws {
+        let sessionID = UUID(uuidString: "F6D87659-63D8-4D64-B952-F4C2A9C52EB8")!
+        let playlist = try XCTUnwrap(
+            NativePlaybackProxyUtilities.makeMediaPlaylist(
+                scheme: "newbi-proxy",
+                sessionID: sessionID,
+                segments: [
+                    .init(segmentPath: "/progressive/0.segment", durationSeconds: 30),
+                    .init(segmentPath: "/progressive/1.segment", durationSeconds: 45)
+                ]
+            )
+        )
+
+        XCTAssertTrue(playlist.contains("#EXT-X-TARGETDURATION:45"))
+        XCTAssertTrue(playlist.contains("newbi-proxy://f6d87659-63d8-4d64-b952-f4c2a9c52eb8/progressive/0.segment"))
+        XCTAssertTrue(playlist.contains("newbi-proxy://f6d87659-63d8-4d64-b952-f4c2a9c52eb8/progressive/1.segment"))
+        XCTAssertTrue(playlist.contains("#EXT-X-ENDLIST"))
+    }
+
     func testRangeHeaderGeneration() {
         XCTAssertEqual(
             NativePlaybackProxyUtilities.makeRangeHeader(requestedOffset: 1024, currentOffset: 0, requestedLength: 2048),
@@ -57,5 +76,45 @@ final class NativePlaybackResourceLoaderTests: XCTestCase {
         XCTAssertEqual(headers["Origin"], "https://www.bilibili.com")
         XCTAssertTrue(headers["User-Agent"]?.contains("Mozilla/5.0") == true)
         XCTAssertEqual(headers["Range"], "bytes=0-1023")
+    }
+
+    func testDeduplicatedCandidateURLsPreservesOrder() {
+        let a = URL(string: "https://example.com/a.m4s")!
+        let b = URL(string: "https://example.com/b.m4s")!
+        let c = URL(string: "https://example.com/c.m4s")!
+
+        let result = NativePlaybackProxyUtilities.deduplicatedCandidateURLs([a, b, a, c, b, c])
+
+        XCTAssertEqual(result, [a, b, c])
+    }
+
+    func testPrioritizedCandidateURLsMovesPreferredToFront() {
+        let a = URL(string: "https://example.com/a.m4s")!
+        let b = URL(string: "https://example.com/b.m4s")!
+        let c = URL(string: "https://example.com/c.m4s")!
+
+        let result = NativePlaybackProxyUtilities.prioritizedCandidateURLs([a, b, c], preferred: c)
+
+        XCTAssertEqual(result, [c, a, b])
+    }
+
+    func testPrioritizedCandidateURLsKeepsOrderWhenPreferredMissing() {
+        let a = URL(string: "https://example.com/a.m4s")!
+        let b = URL(string: "https://example.com/b.m4s")!
+        let missing = URL(string: "https://example.com/missing.m4s")!
+
+        let result = NativePlaybackProxyUtilities.prioritizedCandidateURLs([a, b], preferred: missing)
+
+        XCTAssertEqual(result, [a, b])
+    }
+
+    func testPrioritizedCandidateURLsHandlesDuplicatesWithPreferred() {
+        let a = URL(string: "https://example.com/a.m4s")!
+        let b = URL(string: "https://example.com/b.m4s")!
+        let c = URL(string: "https://example.com/c.m4s")!
+
+        let result = NativePlaybackProxyUtilities.prioritizedCandidateURLs([a, b, a, c, b], preferred: b)
+
+        XCTAssertEqual(result, [b, a, c])
     }
 }

@@ -282,21 +282,57 @@ public struct BiliPublicHTMLParser: Sendable {
 
     private func parseProgressiveStream(data: [String: Any]) -> PlayableStream? {
         let durl = JSONHelpers.array(data["durl"]) ?? []
-        guard let first = durl.first,
-              let firstDict = JSONHelpers.dict(first)
+        guard !durl.isEmpty else {
+            return nil
+        }
+        let qualityID = JSONHelpers.int(data["quality"])
+        let qualityLabel = resolveQualityLabel(data: data, fallbackQuality: qualityID)
+        if durl.count == 1 {
+            guard let first = durl.first,
+                  let firstDict = JSONHelpers.dict(first)
+            else {
+                return nil
+            }
+            let candidates = urlCandidates(from: firstDict)
+            guard let url = candidates.first else {
+                return nil
+            }
+
+            let format = JSONHelpers.string(data["format"]) ?? inferFormat(from: url)
+            return PlayableStream(
+                transport: .progressive(url: url, fallbackURLs: Array(candidates.dropFirst())),
+                headers: .bilibiliDefault,
+                qualityID: qualityID,
+                qualityLabel: qualityLabel,
+                format: format
+            )
+        }
+
+        let segments = durl.compactMap { raw -> ProgressivePlaylistSegment? in
+            guard let dict = JSONHelpers.dict(raw) else {
+                return nil
+            }
+            let candidates = urlCandidates(from: dict)
+            guard let url = candidates.first else {
+                return nil
+            }
+
+            return ProgressivePlaylistSegment(
+                url: url,
+                fallbackURLs: Array(candidates.dropFirst()),
+                durationSeconds: durlDurationSeconds(from: dict["length"])
+            )
+        }
+
+        guard segments.count == durl.count,
+              let firstURL = segments.first?.url
         else {
             return nil
         }
-        let candidates = urlCandidates(from: firstDict)
-        guard let url = candidates.first else {
-            return nil
-        }
 
-        let format = JSONHelpers.string(data["format"]) ?? inferFormat(from: url)
-        let qualityID = JSONHelpers.int(data["quality"])
-        let qualityLabel = resolveQualityLabel(data: data, fallbackQuality: qualityID)
+        let format = JSONHelpers.string(data["format"]) ?? inferFormat(from: firstURL)
         return PlayableStream(
-            transport: .progressive(url: url, fallbackURLs: Array(candidates.dropFirst())),
+            transport: .progressivePlaylist(segments: segments),
             headers: .bilibiliDefault,
             qualityID: qualityID,
             qualityLabel: qualityLabel,
@@ -678,6 +714,16 @@ public struct BiliPublicHTMLParser: Sendable {
     private func inferFormat(from url: URL) -> String {
         let ext = url.pathExtension.lowercased()
         return ext.isEmpty ? "unknown" : ext
+    }
+
+    private func durlDurationSeconds(from rawLength: Any?) -> Double? {
+        guard let lengthMilliseconds = JSONHelpers.double(rawLength),
+              lengthMilliseconds > 0
+        else {
+            return nil
+        }
+
+        return lengthMilliseconds / 1000
     }
 
     private func htmlEntityDecode(_ text: String?) -> String? {

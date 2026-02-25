@@ -321,7 +321,7 @@ struct PlayerView: View {
         qualityOptions: [PlayableStream]
     ) -> [PlaybackAttempt] {
         switch stream.transport {
-        case .progressive:
+        case .progressive, .progressivePlaylist:
             let retry = makeRetryStream(
                 from: stream,
                 qualityOptions: qualityOptions,
@@ -431,6 +431,19 @@ struct PlayerView: View {
                     from: stream,
                     transport: .progressive(url: next, fallbackURLs: rotatedFallbacks)
                 )
+            }
+
+            if prioritizeCompatibility {
+                return stream
+            }
+
+            guard let downgraded = nextLowerQualityStream(from: stream, options: qualityOptions) else {
+                return stream
+            }
+            return downgraded
+        case .progressivePlaylist:
+            if let strictLower = strictlyLowerQualityStreams(from: stream, options: qualityOptions).first {
+                return strictLower
             }
 
             if prioritizeCompatibility {
@@ -663,6 +676,9 @@ struct PlayerView: View {
         case .progressive(let url, let fallbackURLs):
             let fallbackText = fallbackURLs.map(\.absoluteString).joined(separator: ",")
             return "progressive|\(url.absoluteString)|\(fallbackText)"
+        case .progressivePlaylist(let segments):
+            let firstURL = segments.first?.url.absoluteString ?? "nil"
+            return "progressivePlaylist|\(firstURL)|count=\(segments.count)"
         case .dash(let videoURL, let audioURL, let videoFallbackURLs, let audioFallbackURLs):
             let audioText = audioURL?.absoluteString ?? "nil"
             let videoFallbackText = videoFallbackURLs.map(\.absoluteString).joined(separator: ",")
@@ -813,14 +829,25 @@ struct PlayerView: View {
     }
 
     private func isLikelyUnsupportedFLV(stream: PlayableStream?) -> Bool {
-        guard let stream,
-              case .progressive(let url, _) = stream.transport
-        else {
+        guard let stream else {
+            return false
+        }
+
+        let sampleURL: URL
+        switch stream.transport {
+        case .progressive(let url, _):
+            sampleURL = url
+        case .progressivePlaylist(let segments):
+            guard let first = segments.first else {
+                return false
+            }
+            sampleURL = first.url
+        case .dash:
             return false
         }
 
         let format = stream.format.lowercased()
-        let ext = url.pathExtension.lowercased()
+        let ext = sampleURL.pathExtension.lowercased()
         return format.contains("flv") || ext == "flv" || ext == "f4v"
     }
 
@@ -841,6 +868,12 @@ struct PlayerView: View {
                 details.append("stream=progressive format=\(stream.format)")
                 details.append("url=\(url.absoluteString)")
                 details.append("fallback_count=\(fallbackURLs.count)")
+            case .progressivePlaylist(let segments):
+                details.append("stream=progressive_playlist format=\(stream.format)")
+                details.append("segment_count=\(segments.count)")
+                if let firstURL = segments.first?.url {
+                    details.append("first_url=\(firstURL.absoluteString)")
+                }
             case .dash(let videoURL, let audioURL, let videoFallbackURLs, let audioFallbackURLs):
                 details.append("stream=dash format=\(stream.format)")
                 details.append("video=\(videoURL.absoluteString)")

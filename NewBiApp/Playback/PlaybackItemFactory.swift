@@ -33,6 +33,9 @@ final class PlaybackItemFactory: PlaybackItemFactoryProtocol {
                 headers: stream.headers
             )
             return AVPlayerItem(asset: videoAsset)
+        case .progressivePlaylist:
+            let proxyAsset = try await resourceLoader.makeAsset(for: stream)
+            return AVPlayerItem(asset: proxyAsset)
         case .dash(let videoURL, let audioURL, let videoFallbackURLs, let audioFallbackURLs):
             if mode == .proxyOnly {
                 if audioURL == nil {

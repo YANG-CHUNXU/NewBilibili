@@ -90,6 +90,50 @@ final class BiliPublicHTMLParserTests: XCTestCase {
         XCTAssertEqual(stream.headers.referer, "https://www.bilibili.com")
     }
 
+    func testParsePlayableStreamFromMultiDurlBuildsProgressivePlaylist() throws {
+        let html = try loadFixture("play_page_multi_durl")
+        let stream = try parser.parsePlayableStream(from: html)
+
+        guard case .progressivePlaylist(let segments) = stream.transport else {
+            return XCTFail("expected progressive playlist transport")
+        }
+
+        XCTAssertEqual(segments.count, 2)
+        XCTAssertEqual(segments[0].url.absoluteString, "https://example.com/video-part-1.mp4")
+        XCTAssertEqual(segments[1].url.absoluteString, "https://example.com/video-part-2.mp4")
+        XCTAssertEqual(segments[0].durationSeconds, 30)
+        XCTAssertEqual(segments[1].durationSeconds, 45)
+        XCTAssertEqual(stream.qualityLabel, "高清 720P")
+    }
+
+    func testParsePlayableStreamFromInvalidMultiDurlThrowsNoPlayableStream() throws {
+        let html = """
+        <!doctype html>
+        <html>
+        <body>
+        <script>
+        window.__playinfo__={
+          "data": {
+            "quality": 64,
+            "accept_quality": [64,32],
+            "accept_description": ["高清 720P","清晰 480P"],
+            "format": "mp4",
+            "durl": [
+              {"url": "https://example.com/video-part-1.mp4", "length": 30000},
+              {"length": 45000}
+            ]
+          }
+        };
+        </script>
+        </body>
+        </html>
+        """
+
+        XCTAssertThrowsError(try parser.parsePlayableStream(from: html)) { error in
+            XCTAssertEqual(error as? BiliClientError, .noPlayableStream)
+        }
+    }
+
     func testParsePlayableStreamPrefersDashWhenBothDashAndDurlExist() throws {
         let html = """
         <!doctype html>

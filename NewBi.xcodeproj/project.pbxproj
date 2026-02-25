@@ -15,6 +15,7 @@
 		4CB90FCBE2A471B4C28F17C9 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D7AE70B2EF523BADFB45A7F /* ContentView.swift */; };
 		5B9BA6B87D660663C7DBF33F /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 016B11F96A76DAFEFB546081 /* PlayerView.swift */; };
 		5BFCE7E1CA9782BB3A893C8B /* SubscriptionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7577D8C91C0AA165621F3F9 /* SubscriptionsView.swift */; };
+		753A302F250BD390A157FDE8 /* SessdataKeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9842B8BA3FF24EF4E70F4D70 /* SessdataKeychainStore.swift */; };
 		91D0BCC0947D4EAEACF98325 /* NewBiCore in Frameworks */ = {isa = PBXBuildFile; productRef = D60B896939C708C39567A64E /* NewBiCore */; };
 		95C779BE41A65DBB455401D2 /* NativePlaybackResourceLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4D37E28D0014B53EDFC00D0 /* NativePlaybackResourceLoader.swift */; };
 		C5F73DBFF5046383AB5AB282 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 861342B35FDB7A9BC28B6F65 /* LaunchScreen.storyboard */; };
@@ -43,6 +44,7 @@
 		7626A188CF73E032DAE0B83F /* PlaybackItemFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackItemFactory.swift; sourceTree = "<group>"; };
 		7D7AE70B2EF523BADFB45A7F /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		861342B35FDB7A9BC28B6F65 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
+		9842B8BA3FF24EF4E70F4D70 /* SessdataKeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessdataKeychainStore.swift; sourceTree = "<group>"; };
 		A4D37E28D0014B53EDFC00D0 /* NativePlaybackResourceLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePlaybackResourceLoader.swift; sourceTree = "<group>"; };
 		B3C4B9F31844D3A7BA74AA4D /* NewBi */ = {isa = PBXFileReference; lastKnownFileType = folder; name = NewBi; path = .; sourceTree = SOURCE_ROOT; };
 		D7577D8C91C0AA165621F3F9 /* SubscriptionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionsView.swift; sourceTree = "<group>"; };
@@ -120,6 +122,7 @@
 			isa = PBXGroup;
 			children = (
 				478142C78A7D2A69B95EAB31 /* AppEnvironment.swift */,
+				9842B8BA3FF24EF4E70F4D70 /* SessdataKeychainStore.swift */,
 			);
 			path = Support;
 			sourceTree = "<group>";
@@ -220,6 +223,7 @@
 				184F8F194AF5F0710AE475CA /* PlaybackItemFactory.swift in Sources */,
 				5B9BA6B87D660663C7DBF33F /* PlayerView.swift in Sources */,
 				442487250AC3A1A4B29BCAAC /* SearchView.swift in Sources */,
+				753A302F250BD390A157FDE8 /* SessdataKeychainStore.swift in Sources */,
 				5BFCE7E1CA9782BB3A893C8B /* SubscriptionsView.swift in Sources */,
 				D87FDE414EA82EEB58FA946C /* SwiftDataModels.swift in Sources */,
 				E92103A06DB259BC66C487AD /* SwiftDataSubscriptionRepository.swift in Sources */,

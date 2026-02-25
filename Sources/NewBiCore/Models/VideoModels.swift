@@ -116,8 +116,21 @@ public struct PlaybackHeaders: Hashable, Sendable {
     )
 }
 
+public struct ProgressivePlaylistSegment: Hashable, Sendable {
+    public let url: URL
+    public let fallbackURLs: [URL]
+    public let durationSeconds: Double?
+
+    public init(url: URL, fallbackURLs: [URL] = [], durationSeconds: Double? = nil) {
+        self.url = url
+        self.fallbackURLs = fallbackURLs
+        self.durationSeconds = durationSeconds
+    }
+}
+
 public enum PlayTransport: Hashable, Sendable {
     case progressive(url: URL, fallbackURLs: [URL] = [])
+    case progressivePlaylist(segments: [ProgressivePlaylistSegment])
     case dash(
         videoURL: URL,
         audioURL: URL?,
@@ -167,6 +180,9 @@ public struct PlayableStream: Hashable, Sendable {
         switch transport {
         case .progressive(let url, _):
             return "p:\(url.absoluteString)"
+        case .progressivePlaylist(let segments):
+            let first = segments.first?.url.absoluteString ?? "empty"
+            return "pp:\(first)#\(segments.count)"
         case .dash(let videoURL, _, _, _):
             return "d:\(videoURL.absoluteString)"
         }

@@ -8,6 +8,7 @@ final class NativePlaybackResourceLoader: NSObject {
 
     private static let proxyScheme = "newbi-proxy"
     private static let sessionTimeout: TimeInterval = 10 * 60
+    private static let streamChunkSize = 64 * 1024
 
     private let urlSession: URLSession
     private let store: ProxySessionStore
@@ -32,6 +33,8 @@ final class NativePlaybackResourceLoader: NSObject {
         switch stream.transport {
         case .progressive:
             entryPath = "/progressive"
+        case .progressivePlaylist:
+            entryPath = "/progressive.m3u8"
         case .dash:
             entryPath = "/master.m3u8"
         }
@@ -75,6 +78,13 @@ final class NativePlaybackResourceLoader: NSObject {
             return nil
         }
 
+        if url.path == "/progressive.m3u8" {
+            return ProxyRoute(sessionID: sessionID, kind: .progressivePlaylist)
+        }
+        if let index = progressiveSegmentIndex(fromPath: url.path) {
+            return ProxyRoute(sessionID: sessionID, kind: .progressivePlaylistSegment(index: index))
+        }
+
         switch url.path {
         case "/master.m3u8":
             return ProxyRoute(sessionID: sessionID, kind: .masterPlaylist)
@@ -91,6 +101,28 @@ final class NativePlaybackResourceLoader: NSObject {
         default:
             return nil
         }
+    }
+
+    private func progressiveSegmentPath(index: Int) -> String {
+        "/progressive/\(index).segment"
+    }
+
+    private func progressiveSegmentIndex(fromPath path: String) -> Int? {
+        guard path.hasPrefix("/progressive/"),
+              path.hasSuffix(".segment")
+        else {
+            return nil
+        }
+
+        let prefixCount = "/progressive/".count
+        let suffixCount = ".segment".count
+        let start = path.index(path.startIndex, offsetBy: prefixCount)
+        let end = path.index(path.endIndex, offsetBy: -suffixCount)
+        guard start < end else {
+            return nil
+        }
+
+        return Int(path[start..<end])
     }
 
     private func register(task: Task<Void, Never>, for request: AVAssetResourceLoadingRequest) {
@@ -139,33 +171,72 @@ final class NativePlaybackResourceLoader: NSObject {
             case .audioPlaylist:
                 let text = makeMediaPlaylist(sessionID: route.sessionID, segmentPath: "/audio.segment")
                 try respondText(text, contentType: UTType.m3uPlaylist.identifier, to: loadingRequest)
+            case .progressivePlaylist:
+                let text = try makeProgressivePlaylist(sessionID: route.sessionID, stream: session.stream)
+                try respondText(text, contentType: UTType.m3uPlaylist.identifier, to: loadingRequest)
             case .progressiveSegment:
-                guard case .progressive(let remoteURL, _) = session.stream.transport else {
+                guard case .progressive(let remoteURL, let fallbackURLs) = session.stream.transport else {
                     throw BiliClientError.unsupportedDashStream("会话并非 progressive 流")
                 }
-                try await proxyRemote(remoteURL, headers: session.stream.headers, to: loadingRequest)
+                try await proxyRemoteWithFallback(
+                    sessionID: route.sessionID,
+                    lane: .progressive,
+                    candidates: [remoteURL] + fallbackURLs,
+                    headers: session.stream.headers,
+                    to: loadingRequest
+                )
+            case .progressivePlaylistSegment(let index):
+                guard case .progressivePlaylist(let segments) = session.stream.transport else {
+                    throw BiliClientError.unsupportedDashStream("会话并非 progressive playlist 流")
+                }
+                guard segments.indices.contains(index) else {
+                    throw BiliClientError.playbackProxyFailed("分段索引越界: \(index)")
+                }
+                let segment = segments[index]
+                try await proxyRemoteWithFallback(
+                    sessionID: route.sessionID,
+                    lane: .progressive,
+                    candidates: [segment.url] + segment.fallbackURLs,
+                    headers: session.stream.headers,
+                    to: loadingRequest
+                )
             case .videoSegment:
-                guard case .dash(let videoURL, _, _, _) = session.stream.transport else {
+                guard case .dash(let videoURL, _, let videoFallbackURLs, _) = session.stream.transport else {
                     throw BiliClientError.unsupportedDashStream("会话并非 DASH 流")
                 }
-                try await proxyRemote(videoURL, headers: session.stream.headers, to: loadingRequest)
+                try await proxyRemoteWithFallback(
+                    sessionID: route.sessionID,
+                    lane: .video,
+                    candidates: [videoURL] + videoFallbackURLs,
+                    headers: session.stream.headers,
+                    to: loadingRequest
+                )
             case .audioSegment:
-                guard case .dash(_, let audioURL, _, _) = session.stream.transport else {
+                guard case .dash(_, let audioURL, _, let audioFallbackURLs) = session.stream.transport else {
                     throw BiliClientError.unsupportedDashStream("会话并非 DASH 流")
                 }
                 guard let audioURL else {
                     throw BiliClientError.unsupportedDashStream("DASH 音频轨缺失")
                 }
-                try await proxyRemote(audioURL, headers: session.stream.headers, to: loadingRequest)
+                try await proxyRemoteWithFallback(
+                    sessionID: route.sessionID,
+                    lane: .audio,
+                    candidates: [audioURL] + audioFallbackURLs,
+                    headers: session.stream.headers,
+                    to: loadingRequest
+                )
             }
         } catch {
+            if isCancellationError(error) {
+                return
+            }
             loadingRequest.finishLoading(with: error)
         }
     }
 
     private func makeMasterPlaylist(sessionID: UUID, stream: PlayableStream) throws -> String {
         switch stream.transport {
-        case .progressive:
+        case .progressive, .progressivePlaylist:
             throw BiliClientError.playbackProxyFailed("progressive 不需要 master 清单")
         case .dash(_, let audioURL, _, _):
             guard let playlist = NativePlaybackProxyUtilities.makeMasterPlaylist(
@@ -187,6 +258,31 @@ final class NativePlaybackResourceLoader: NSObject {
         ) ?? "#EXTM3U\n#EXT-X-ENDLIST"
     }
 
+    private func makeProgressivePlaylist(sessionID: UUID, stream: PlayableStream) throws -> String {
+        guard case .progressivePlaylist(let segments) = stream.transport else {
+            throw BiliClientError.playbackProxyFailed("会话并非 progressive playlist 流")
+        }
+        guard !segments.isEmpty else {
+            throw BiliClientError.playbackProxyFailed("progressive playlist 为空")
+        }
+
+        let playlistSegments = segments.enumerated().map { index, segment in
+            NativePlaybackProxyUtilities.MediaPlaylistSegment(
+                segmentPath: progressiveSegmentPath(index: index),
+                durationSeconds: segment.durationSeconds
+            )
+        }
+        guard let playlist = NativePlaybackProxyUtilities.makeMediaPlaylist(
+            scheme: Self.proxyScheme,
+            sessionID: sessionID,
+            segments: playlistSegments
+        ) else {
+            throw BiliClientError.playbackProxyFailed("生成 progressive playlist 失败")
+        }
+
+        return playlist
+    }
+
     private func respondText(_ text: String, contentType: String, to loadingRequest: AVAssetResourceLoadingRequest) throws {
         guard let data = text.data(using: .utf8) else {
             throw BiliClientError.playbackProxyFailed("清单编码失败")
@@ -202,6 +298,35 @@ final class NativePlaybackResourceLoader: NSObject {
         loadingRequest.finishLoading()
     }
 
+    private func proxyRemoteWithFallback(
+        sessionID: UUID,
+        lane: ProxyRemoteLane,
+        candidates: [URL],
+        headers: PlaybackHeaders,
+        to loadingRequest: AVAssetResourceLoadingRequest
+    ) async throws {
+        let orderedCandidates = await store.orderedCandidates(candidates, for: lane, in: sessionID)
+        guard !orderedCandidates.isEmpty else {
+            throw BiliClientError.playbackProxyFailed("缺少可用分段地址")
+        }
+
+        var lastError: Error?
+        for remoteURL in orderedCandidates {
+            do {
+                try await proxyRemote(remoteURL, headers: headers, to: loadingRequest)
+                await store.markPreferredCandidate(remoteURL, for: lane, in: sessionID)
+                return
+            } catch {
+                if isCancellationError(error) {
+                    throw error
+                }
+                lastError = error
+            }
+        }
+
+        throw lastError ?? BiliClientError.playbackProxyFailed("分段代理失败")
+    }
+
     private func proxyRemote(
         _ remoteURL: URL,
         headers: PlaybackHeaders,
@@ -209,17 +334,21 @@ final class NativePlaybackResourceLoader: NSObject {
     ) async throws {
         var request = URLRequest(url: remoteURL)
         request.timeoutInterval = 20
-        let rangeValue = makeRangeHeader(for: loadingRequest.dataRequest)
+        let requestedRange = RequestedRange(dataRequest: loadingRequest.dataRequest)
+        let rangeValue = requestedRange?.headerValue
         let forwardHeaders = NativePlaybackProxyUtilities.buildForwardHeaders(base: headers, range: rangeValue)
         for (key, value) in forwardHeaders {
             request.setValue(value, forHTTPHeaderField: key)
         }
 
-        let data: Data
+        let bytes: URLSession.AsyncBytes
         let response: URLResponse
         do {
-            (data, response) = try await urlSession.data(for: request)
+            (bytes, response) = try await urlSession.bytes(for: request)
         } catch {
+            if isCancellationError(error) {
+                throw CancellationError()
+            }
             throw BiliClientError.playbackProxyFailed(error.localizedDescription)
         }
 
@@ -230,56 +359,40 @@ final class NativePlaybackResourceLoader: NSObject {
             throw BiliClientError.networkFailed("HTTP \(http.statusCode)")
         }
 
-        let payload = adjustedPayload(data: data, httpStatusCode: http.statusCode, dataRequest: loadingRequest.dataRequest)
+        let parsedContentRange = try validateRangeResponse(http: http, requestedRange: requestedRange)
 
         if let info = loadingRequest.contentInformationRequest {
             info.contentType = resolvedContentType(remoteURL: remoteURL, mimeType: http.mimeType)
-            info.contentLength = resolvedContentLength(http: http, dataCount: data.count, dataRequest: loadingRequest.dataRequest)
+            if let contentLength = resolvedContentLength(http: http, parsedContentRange: parsedContentRange) {
+                info.contentLength = contentLength
+            }
             info.isByteRangeAccessSupported = true
         }
 
-        loadingRequest.dataRequest?.respond(with: payload)
+        var buffer = Data()
+        buffer.reserveCapacity(Self.streamChunkSize)
+
+        do {
+            for try await byte in bytes {
+                try Task.checkCancellation()
+                buffer.append(byte)
+                if buffer.count >= Self.streamChunkSize {
+                    loadingRequest.dataRequest?.respond(with: buffer)
+                    buffer.removeAll(keepingCapacity: true)
+                }
+            }
+        } catch {
+            if isCancellationError(error) {
+                throw CancellationError()
+            }
+            throw BiliClientError.playbackProxyFailed(error.localizedDescription)
+        }
+
+        if !buffer.isEmpty {
+            loadingRequest.dataRequest?.respond(with: buffer)
+        }
+
         loadingRequest.finishLoading()
-    }
-
-    private func makeRangeHeader(for dataRequest: AVAssetResourceLoadingDataRequest?) -> String? {
-        guard let dataRequest else {
-            return nil
-        }
-
-        return NativePlaybackProxyUtilities.makeRangeHeader(
-            requestedOffset: dataRequest.requestedOffset,
-            currentOffset: dataRequest.currentOffset,
-            requestedLength: dataRequest.requestedLength
-        )
-    }
-
-    private func adjustedPayload(
-        data: Data,
-        httpStatusCode: Int,
-        dataRequest: AVAssetResourceLoadingDataRequest?
-    ) -> Data {
-        guard httpStatusCode == 200, let dataRequest else {
-            return data
-        }
-
-        let startOffset = dataRequest.currentOffset > 0 ? dataRequest.currentOffset : dataRequest.requestedOffset
-        guard startOffset >= 0 else {
-            return data
-        }
-
-        let start = min(max(Int(startOffset), 0), data.count)
-        guard start < data.count else {
-            return Data()
-        }
-
-        let requestedLength = dataRequest.requestedLength
-        if requestedLength <= 0 {
-            return data.subdata(in: start..<data.count)
-        }
-
-        let end = min(start + requestedLength, data.count)
-        return data.subdata(in: start..<end)
     }
 
     private func resolvedContentType(remoteURL: URL, mimeType: String?) -> String {
@@ -305,30 +418,66 @@ final class NativePlaybackResourceLoader: NSObject {
 
     private func resolvedContentLength(
         http: HTTPURLResponse,
-        dataCount: Int,
-        dataRequest: AVAssetResourceLoadingDataRequest?
-    ) -> Int64 {
-        if let contentRange = http.value(forHTTPHeaderField: "Content-Range"),
-           let slashIndex = contentRange.lastIndex(of: "/")
-        {
-            let totalString = contentRange[contentRange.index(after: slashIndex)...]
-            if let total = Int64(totalString) {
-                return total
-            }
+        parsedContentRange: ParsedContentRange?
+    ) -> Int64? {
+        if let totalLength = parsedContentRange?.totalLength {
+            return totalLength
         }
 
         if let contentLength = http.value(forHTTPHeaderField: "Content-Length"),
            let contentLength = Int64(contentLength)
         {
-            if http.statusCode == 206,
-               let dataRequest
-            {
-                return dataRequest.requestedOffset + contentLength
-            }
             return contentLength
         }
 
-        return Int64(dataCount)
+        let expected = http.expectedContentLength
+        return expected >= 0 ? expected : nil
+    }
+
+    private func validateRangeResponse(
+        http: HTTPURLResponse,
+        requestedRange: RequestedRange?
+    ) throws -> ParsedContentRange? {
+        let parsedContentRange = http.value(forHTTPHeaderField: "Content-Range").flatMap(ParsedContentRange.parse)
+
+        guard let requestedRange else {
+            return parsedContentRange
+        }
+
+        guard http.statusCode == 206 else {
+            throw BiliClientError.playbackProxyFailed("Range 请求未返回 206")
+        }
+
+        guard let parsedContentRange else {
+            throw BiliClientError.playbackProxyFailed("Range 响应缺少或无效 Content-Range")
+        }
+
+        guard parsedContentRange.start == requestedRange.start else {
+            throw BiliClientError.playbackProxyFailed("Range 响应起点与请求不一致")
+        }
+
+        if let requestedEnd = requestedRange.end,
+           parsedContentRange.end > requestedEnd
+        {
+            throw BiliClientError.playbackProxyFailed("Range 响应超出请求范围")
+        }
+
+        return parsedContentRange
+    }
+
+    private func isCancellationError(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+
+        if let urlError = error as? URLError,
+           urlError.code == .cancelled
+        {
+            return true
+        }
+
+        let nsError = error as NSError
+        return nsError.domain == NSURLErrorDomain && nsError.code == URLError.cancelled.rawValue
     }
 }
 
@@ -358,7 +507,9 @@ private struct ProxyRoute {
         case masterPlaylist
         case videoPlaylist
         case audioPlaylist
+        case progressivePlaylist
         case progressiveSegment
+        case progressivePlaylistSegment(index: Int)
         case videoSegment
         case audioSegment
     }
@@ -367,11 +518,108 @@ private struct ProxyRoute {
     let kind: Kind
 }
 
+private enum ProxyRemoteLane: String, Hashable, Sendable {
+    case progressive
+    case video
+    case audio
+}
+
+private struct RequestedRange {
+    let start: Int64
+    let end: Int64?
+
+    init?(dataRequest: AVAssetResourceLoadingDataRequest?) {
+        guard let dataRequest else {
+            return nil
+        }
+
+        let startOffset = dataRequest.currentOffset > 0 ? dataRequest.currentOffset : dataRequest.requestedOffset
+        let requestedLength = dataRequest.requestedLength
+        if startOffset == 0, requestedLength <= 0 {
+            return nil
+        }
+
+        guard startOffset >= 0 else {
+            return nil
+        }
+
+        self.start = startOffset
+
+        if requestedLength > 0 {
+            let length = Int64(requestedLength)
+            guard startOffset <= Int64.max - length + 1 else {
+                return nil
+            }
+            self.end = startOffset + length - 1
+        } else {
+            self.end = nil
+        }
+    }
+
+    var headerValue: String {
+        if let end {
+            return "bytes=\(start)-\(end)"
+        }
+        return "bytes=\(start)-"
+    }
+}
+
+private struct ParsedContentRange {
+    let start: Int64
+    let end: Int64
+    let totalLength: Int64?
+
+    static func parse(_ rawValue: String) -> ParsedContentRange? {
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.lowercased().hasPrefix("bytes ") else {
+            return nil
+        }
+
+        let rangeAndTotal = value.dropFirst(6)
+        let parts = rangeAndTotal.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2 else {
+            return nil
+        }
+
+        let rangePart = String(parts[0]).trimmingCharacters(in: .whitespaces)
+        let totalPart = String(parts[1]).trimmingCharacters(in: .whitespaces)
+        guard rangePart != "*" else {
+            return nil
+        }
+
+        let bounds = rangePart.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+        guard bounds.count == 2,
+              let start = Int64(bounds[0]),
+              let end = Int64(bounds[1]),
+              start >= 0,
+              end >= start
+        else {
+            return nil
+        }
+
+        let totalLength: Int64?
+        if totalPart == "*" {
+            totalLength = nil
+        } else {
+            guard let parsedTotal = Int64(totalPart),
+                  parsedTotal > 0,
+                  end < parsedTotal
+            else {
+                return nil
+            }
+            totalLength = parsedTotal
+        }
+
+        return ParsedContentRange(start: start, end: end, totalLength: totalLength)
+    }
+}
+
 private actor ProxySessionStore {
     struct SessionEntry {
         let stream: PlayableStream
         let createdAt: Date
         var lastAccessedAt: Date
+        var preferredRemoteByLane: [ProxyRemoteLane: String]
     }
 
     private var sessions: [UUID: SessionEntry] = [:]
@@ -385,7 +633,12 @@ private actor ProxySessionStore {
         purgeExpired()
         let id = UUID()
         let now = Date()
-        sessions[id] = SessionEntry(stream: stream, createdAt: now, lastAccessedAt: now)
+        sessions[id] = SessionEntry(
+            stream: stream,
+            createdAt: now,
+            lastAccessedAt: now,
+            preferredRemoteByLane: [:]
+        )
         return id
     }
 
@@ -401,6 +654,36 @@ private actor ProxySessionStore {
 
     func remove(_ id: UUID) {
         sessions.removeValue(forKey: id)
+    }
+
+    func orderedCandidates(_ candidates: [URL], for lane: ProxyRemoteLane, in sessionID: UUID) -> [URL] {
+        purgeExpired()
+
+        let uniqueCandidates = NativePlaybackProxyUtilities.deduplicatedCandidateURLs(candidates)
+        guard !uniqueCandidates.isEmpty else {
+            return []
+        }
+
+        guard var entry = sessions[sessionID] else {
+            return uniqueCandidates
+        }
+
+        entry.lastAccessedAt = Date()
+        sessions[sessionID] = entry
+
+        let preferred = entry.preferredRemoteByLane[lane].flatMap(URL.init(string:))
+        return NativePlaybackProxyUtilities.prioritizedCandidateURLs(uniqueCandidates, preferred: preferred)
+    }
+
+    func markPreferredCandidate(_ candidate: URL, for lane: ProxyRemoteLane, in sessionID: UUID) {
+        purgeExpired()
+        guard var entry = sessions[sessionID] else {
+            return
+        }
+
+        entry.lastAccessedAt = Date()
+        entry.preferredRemoteByLane[lane] = candidate.absoluteString
+        sessions[sessionID] = entry
     }
 
     private func purgeExpired(now: Date = Date()) {

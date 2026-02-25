@@ -4,18 +4,24 @@ public final class PublicWebFetcher: @unchecked Sendable {
     private let session: URLSession
     private let scheduler: RequestScheduler
     private let warmupGate = WarmupGate()
-    private let sessdataDefaultsKey = "newbi.bilibili.sessdata"
+    private let sessdataProvider: (@Sendable () -> String?)?
     private let desktopUserAgent =
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-    public init() {
+    public init(sessdataProvider: (@Sendable () -> String?)? = nil) {
         self.session = Self.makeDefaultSession()
         self.scheduler = RequestScheduler()
+        self.sessdataProvider = sessdataProvider
     }
 
-    public init(session: URLSession, scheduler: RequestScheduler = RequestScheduler()) {
+    public init(
+        session: URLSession,
+        scheduler: RequestScheduler = RequestScheduler(),
+        sessdataProvider: (@Sendable () -> String?)? = nil
+    ) {
         self.session = session
         self.scheduler = scheduler
+        self.sessdataProvider = sessdataProvider
     }
 
     public func fetchHTML(url: URL) async throws -> String {
@@ -83,8 +89,14 @@ public final class PublicWebFetcher: @unchecked Sendable {
         request.setValue(accept, forHTTPHeaderField: "Accept")
         request.setValue("https://www.bilibili.com", forHTTPHeaderField: "Referer")
         request.setValue("keep-alive", forHTTPHeaderField: "Connection")
-        if let sessdata = normalizedSessdataFromDefaults() {
-            request.setValue("SESSDATA=\(sessdata)", forHTTPHeaderField: "Cookie")
+        if isBilibiliHost(host),
+           let rawSessdata = sessdataProvider?(),
+           let sessdata = Self.normalizedSessdata(rawSessdata)
+        {
+            request.setValue(
+                makeCookieHeader(url: url, sessdata: sessdata),
+                forHTTPHeaderField: "Cookie"
+            )
         }
         for (field, value) in additionalHeaders {
             request.setValue(value, forHTTPHeaderField: field)
@@ -156,14 +168,35 @@ public final class PublicWebFetcher: @unchecked Sendable {
         UInt64((attempt + 1) * 500_000_000)
     }
 
-    private func normalizedSessdataFromDefaults() -> String? {
-        guard var raw = UserDefaults.standard.string(forKey: sessdataDefaultsKey)?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !raw.isEmpty
-        else {
-            return nil
+    private func makeCookieHeader(url: URL, sessdata: String) -> String {
+        let cookieStorage = session.configuration.httpCookieStorage ?? HTTPCookieStorage.shared
+        var cookiePairs: [String] = []
+        var hasSessdata = false
+
+        for cookie in cookieStorage.cookies(for: url) ?? [] {
+            if cookie.name.caseInsensitiveCompare("SESSDATA") == .orderedSame {
+                if !hasSessdata {
+                    cookiePairs.append("SESSDATA=\(sessdata)")
+                    hasSessdata = true
+                }
+            } else {
+                cookiePairs.append("\(cookie.name)=\(cookie.value)")
+            }
         }
 
+        if !hasSessdata {
+            cookiePairs.append("SESSDATA=\(sessdata)")
+        }
+
+        return cookiePairs.joined(separator: "; ")
+    }
+
+    private func isBilibiliHost(_ host: String) -> Bool {
+        host == "bilibili.com" || host.hasSuffix(".bilibili.com")
+    }
+
+    private static func normalizedSessdata(_ rawInput: String) -> String? {
+        var raw = rawInput.trimmingCharacters(in: .whitespacesAndNewlines)
         if raw.lowercased().hasPrefix("sessdata=") {
             raw = String(raw.dropFirst("sessdata=".count)).trimmingCharacters(in: .whitespacesAndNewlines)
         }
