@@ -313,8 +313,10 @@ final class NativePlaybackResourceLoader: NSObject {
         var lastError: Error?
         for remoteURL in orderedCandidates {
             do {
-                try await proxyRemote(remoteURL, headers: headers, to: loadingRequest)
-                await store.markPreferredCandidate(remoteURL, for: lane, in: sessionID)
+                let outcome = try await proxyRemote(remoteURL, headers: headers, to: loadingRequest)
+                if outcome.shouldMarkPreferredCandidate {
+                    await store.markPreferredCandidate(remoteURL, for: lane, in: sessionID)
+                }
                 return
             } catch {
                 if isCancellationError(error) {
@@ -331,7 +333,7 @@ final class NativePlaybackResourceLoader: NSObject {
         _ remoteURL: URL,
         headers: PlaybackHeaders,
         to loadingRequest: AVAssetResourceLoadingRequest
-    ) async throws {
+    ) async throws -> ProxyRemoteOutcome {
         var request = URLRequest(url: remoteURL)
         request.timeoutInterval = 20
         let requestedRange = RequestedRange(dataRequest: loadingRequest.dataRequest)
@@ -359,26 +361,45 @@ final class NativePlaybackResourceLoader: NSObject {
             throw BiliClientError.networkFailed("HTTP \(http.statusCode)")
         }
 
-        let parsedContentRange = try validateRangeResponse(http: http, requestedRange: requestedRange)
+        let rangeDisposition = try validateRangeResponse(http: http, requestedRange: requestedRange)
 
         if let info = loadingRequest.contentInformationRequest {
             info.contentType = resolvedContentType(remoteURL: remoteURL, mimeType: http.mimeType)
-            if let contentLength = resolvedContentLength(http: http, parsedContentRange: parsedContentRange) {
+            if let contentLength = resolvedContentLength(http: http, parsedContentRange: rangeDisposition.parsedContentRange) {
                 info.contentLength = contentLength
             }
-            info.isByteRangeAccessSupported = true
+            info.isByteRangeAccessSupported = rangeDisposition.isByteRangeAccessSupported
         }
 
         var buffer = Data()
         buffer.reserveCapacity(Self.streamChunkSize)
+        var bytesToDiscard = rangeDisposition.bytesToDiscard
+        var remainingBytesToRespond = rangeDisposition.maxBytesToRespond
 
         do {
             for try await byte in bytes {
                 try Task.checkCancellation()
+
+                if bytesToDiscard > 0 {
+                    bytesToDiscard -= 1
+                    continue
+                }
+
+                if let remaining = remainingBytesToRespond, remaining <= 0 {
+                    break
+                }
+
                 buffer.append(byte)
+                if let remaining = remainingBytesToRespond {
+                    remainingBytesToRespond = remaining - 1
+                }
                 if buffer.count >= Self.streamChunkSize {
                     loadingRequest.dataRequest?.respond(with: buffer)
                     buffer.removeAll(keepingCapacity: true)
+                }
+
+                if remainingBytesToRespond == 0 {
+                    break
                 }
             }
         } catch {
@@ -388,11 +409,16 @@ final class NativePlaybackResourceLoader: NSObject {
             throw BiliClientError.playbackProxyFailed(error.localizedDescription)
         }
 
+        if bytesToDiscard > 0 {
+            throw BiliClientError.playbackProxyFailed("Range 起点超出远端资源长度")
+        }
+
         if !buffer.isEmpty {
             loadingRequest.dataRequest?.respond(with: buffer)
         }
 
         loadingRequest.finishLoading()
+        return ProxyRemoteOutcome(shouldMarkPreferredCandidate: rangeDisposition.shouldMarkPreferredCandidate)
     }
 
     private func resolvedContentType(remoteURL: URL, mimeType: String?) -> String {
@@ -437,32 +463,53 @@ final class NativePlaybackResourceLoader: NSObject {
     private func validateRangeResponse(
         http: HTTPURLResponse,
         requestedRange: RequestedRange?
-    ) throws -> ParsedContentRange? {
+    ) throws -> RangeResponseDisposition {
         let parsedContentRange = http.value(forHTTPHeaderField: "Content-Range").flatMap(ParsedContentRange.parse)
 
         guard let requestedRange else {
-            return parsedContentRange
+            return RangeResponseDisposition(
+                parsedContentRange: parsedContentRange,
+                bytesToDiscard: 0,
+                maxBytesToRespond: nil,
+                isByteRangeAccessSupported: true,
+                shouldMarkPreferredCandidate: true
+            )
         }
 
-        guard http.statusCode == 206 else {
-            throw BiliClientError.playbackProxyFailed("Range 请求未返回 206")
-        }
+        switch http.statusCode {
+        case 206:
+            guard let parsedContentRange else {
+                throw BiliClientError.playbackProxyFailed("Range 响应缺少或无效 Content-Range")
+            }
 
-        guard let parsedContentRange else {
-            throw BiliClientError.playbackProxyFailed("Range 响应缺少或无效 Content-Range")
-        }
+            guard parsedContentRange.start == requestedRange.start else {
+                throw BiliClientError.playbackProxyFailed("Range 响应起点与请求不一致")
+            }
 
-        guard parsedContentRange.start == requestedRange.start else {
-            throw BiliClientError.playbackProxyFailed("Range 响应起点与请求不一致")
-        }
+            if let requestedEnd = requestedRange.end,
+               parsedContentRange.end > requestedEnd
+            {
+                throw BiliClientError.playbackProxyFailed("Range 响应超出请求范围")
+            }
 
-        if let requestedEnd = requestedRange.end,
-           parsedContentRange.end > requestedEnd
-        {
-            throw BiliClientError.playbackProxyFailed("Range 响应超出请求范围")
+            return RangeResponseDisposition(
+                parsedContentRange: parsedContentRange,
+                bytesToDiscard: 0,
+                maxBytesToRespond: nil,
+                isByteRangeAccessSupported: true,
+                shouldMarkPreferredCandidate: true
+            )
+        case 200:
+            return RangeResponseDisposition(
+                parsedContentRange: parsedContentRange,
+                bytesToDiscard: requestedRange.start,
+                maxBytesToRespond: requestedRange.length,
+                isByteRangeAccessSupported: false,
+                shouldMarkPreferredCandidate: false
+            )
+        default:
+            throw BiliClientError.playbackProxyFailed("Range 请求返回不支持的状态码: \(http.statusCode)")
         }
-
-        return parsedContentRange
     }
 
     private func isCancellationError(_ error: Error) -> Bool {
@@ -524,6 +571,18 @@ private enum ProxyRemoteLane: String, Hashable, Sendable {
     case audio
 }
 
+private struct ProxyRemoteOutcome {
+    let shouldMarkPreferredCandidate: Bool
+}
+
+private struct RangeResponseDisposition {
+    let parsedContentRange: ParsedContentRange?
+    let bytesToDiscard: Int64
+    let maxBytesToRespond: Int64?
+    let isByteRangeAccessSupported: Bool
+    let shouldMarkPreferredCandidate: Bool
+}
+
 private struct RequestedRange {
     let start: Int64
     let end: Int64?
@@ -561,6 +620,13 @@ private struct RequestedRange {
             return "bytes=\(start)-\(end)"
         }
         return "bytes=\(start)-"
+    }
+
+    var length: Int64? {
+        guard let end else {
+            return nil
+        }
+        return end - start + 1
     }
 }
 
