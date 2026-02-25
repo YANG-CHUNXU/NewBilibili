@@ -4,6 +4,9 @@ import AVFoundation
 import NewBiCore
 
 struct PlayerView: View {
+    private static let compatibilityRetryBudget: TimeInterval = 6
+    private static let maxCompatibilityDirectAttempts = 5
+
     @StateObject private var viewModel: PlayerViewModel
     @State private var player = AVPlayer()
     @State private var isPresentingFullScreenPlayer = false
@@ -11,9 +14,17 @@ struct PlayerView: View {
     @State private var failedToEndObserver: NSObjectProtocol?
     @State private var isViewVisible = false
     @State private var activePlaybackSessionID = UUID()
-    @State private var didRetryPlayback = false
     @State private var isRetryingPlayback = false
+    @State private var pendingRetryAttempts: [PlaybackAttempt] = []
+    @State private var triedAttemptKeys = Set<String>()
+    @State private var retryDeadline: Date?
+    @State private var retryAttemptIndex = 1
+    @State private var retryAttemptTotal = 1
+    @State private var retryPlanInitialized = false
+    @State private var retryReason: PlaybackRetryReason = .nonCompatibility
     @State private var lastAttemptedStream: PlayableStream?
+    @State private var lastAttemptedMode: PlaybackBuildMode = .directPreferred
+    @State private var lastAttemptReasonTag = "initial"
     private let bvidForDebug: String
     private let cidForDebug: Int?
     private let playbackItemFactory: any PlaybackItemFactoryProtocol
@@ -80,9 +91,16 @@ struct PlayerView: View {
                 }
                 .task(id: stream) {
                     let sessionID = beginPlaybackSession()
-                    await preparePlayback(for: stream, sessionID: sessionID)
+                    resetRetryStateForFreshPlayback()
+                    await preparePlayback(
+                        for: stream,
+                        mode: .directPreferred,
+                        reasonTag: "initial",
+                        sessionID: sessionID
+                    )
                 }
-                Text("清晰度: \(stream.qualityLabel) | 格式: \(stream.format)")
+                qualitySelector(for: stream)
+                Text("格式: \(stream.format)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else if viewModel.isLoading {
@@ -113,6 +131,7 @@ struct PlayerView: View {
             Task {
                 await viewModel.recordPlayback(progressSeconds: seconds.isFinite ? seconds : 0)
             }
+            resetRetryStateForFreshPlayback()
             teardownPlayer()
         }
         .fullScreenCover(isPresented: $isPresentingFullScreenPlayer) {
@@ -135,11 +154,19 @@ struct PlayerView: View {
     }
 
     @MainActor
-    private func preparePlayback(for stream: PlayableStream, sessionID: UUID) async {
+    private func preparePlayback(
+        for stream: PlayableStream,
+        mode: PlaybackBuildMode,
+        reasonTag: String,
+        sessionID: UUID
+    ) async {
         do {
             configureAudioSessionForPlayback()
             lastAttemptedStream = stream
-            let item = try await playbackItemFactory.makePlayerItem(from: stream)
+            lastAttemptedMode = mode
+            lastAttemptReasonTag = reasonTag
+            triedAttemptKeys.insert(attemptKey(for: stream, mode: mode))
+            let item = try await playbackItemFactory.makePlayerItem(from: stream, mode: mode)
             guard shouldHandlePlaybackResult(for: sessionID) else {
                 playbackItemFactory.releaseResources(for: item)
                 return
@@ -189,27 +216,26 @@ struct PlayerView: View {
             return
         }
 
-        if !didRetryPlayback, !isRetryingPlayback {
-            didRetryPlayback = true
-            isRetryingPlayback = true
-            await viewModel.load()
+        guard !isRetryingPlayback else {
+            return
+        }
+
+        isRetryingPlayback = true
+        let nextAttempt = nextRetryAttempt(after: error)
+        isRetryingPlayback = false
+
+        if let nextAttempt {
             guard shouldHandlePlaybackResult(for: sessionID) else {
-                isRetryingPlayback = false
                 return
             }
-            if let stream = viewModel.stream {
-                let retrySessionID = beginPlaybackSession()
-                await preparePlayback(for: makeRetryStream(from: stream), sessionID: retrySessionID)
-            } else {
-                let diagnostic = makePlaybackDiagnostic(from: error)
-                logPlaybackDiagnostic(diagnostic)
-                viewModel.reportPlaybackError(
-                    message: diagnostic.userMessage,
-                    code: diagnostic.code,
-                    technicalDetail: diagnostic.technicalDetail
-                )
-            }
-            isRetryingPlayback = false
+            retryAttemptIndex += 1
+            let retrySessionID = beginPlaybackSession()
+            await preparePlayback(
+                for: nextAttempt.stream,
+                mode: nextAttempt.mode,
+                reasonTag: nextAttempt.reasonTag,
+                sessionID: retrySessionID
+            )
             return
         }
 
@@ -222,23 +248,199 @@ struct PlayerView: View {
         )
     }
 
-    private func makeRetryStream(from stream: PlayableStream) -> PlayableStream {
-        guard let lastAttemptedStream, stream == lastAttemptedStream else {
-            return stream
+    @MainActor
+    private func nextRetryAttempt(after error: Error) -> PlaybackAttempt? {
+        if !retryPlanInitialized {
+            retryPlanInitialized = true
+            let compatibility = isCompatibilityFailure(error)
+            retryReason = compatibility ? .compatibility : .nonCompatibility
+            retryDeadline = compatibility ? Date().addingTimeInterval(Self.compatibilityRetryBudget) : nil
+
+            guard let baseStream = lastAttemptedStream ?? viewModel.stream else {
+                retryAttemptTotal = max(retryAttemptIndex, 1)
+                return nil
+            }
+
+            if compatibility {
+                pendingRetryAttempts = buildCompatibilityRetryAttempts(
+                    from: baseStream,
+                    qualityOptions: viewModel.qualityOptions
+                )
+            } else {
+                pendingRetryAttempts = buildNonCompatibilityRetryAttempts(
+                    from: baseStream,
+                    qualityOptions: viewModel.qualityOptions
+                )
+            }
+            retryAttemptTotal = max(retryAttemptIndex + pendingRetryAttempts.count, retryAttemptIndex)
         }
 
+        if retryReason == .compatibility,
+           let retryDeadline,
+           Date() >= retryDeadline
+        {
+            pendingRetryAttempts.removeAll()
+            return nil
+        }
+
+        while let next = pendingRetryAttempts.first {
+            pendingRetryAttempts.removeFirst()
+            let key = attemptKey(for: next.stream, mode: next.mode)
+            guard triedAttemptKeys.insert(key).inserted else {
+                continue
+            }
+            return next
+        }
+
+        return nil
+    }
+
+    private func buildNonCompatibilityRetryAttempts(
+        from stream: PlayableStream,
+        qualityOptions: [PlayableStream]
+    ) -> [PlaybackAttempt] {
+        let retry = makeRetryStream(
+            from: stream,
+            qualityOptions: qualityOptions,
+            prioritizeCompatibility: false
+        )
+        guard retry != stream else {
+            return []
+        }
+        return [
+            PlaybackAttempt(
+                stream: retry,
+                mode: .directPreferred,
+                reasonTag: "non-compat-direct"
+            )
+        ]
+    }
+
+    private func buildCompatibilityRetryAttempts(
+        from stream: PlayableStream,
+        qualityOptions: [PlayableStream]
+    ) -> [PlaybackAttempt] {
+        switch stream.transport {
+        case .progressive:
+            let retry = makeRetryStream(
+                from: stream,
+                qualityOptions: qualityOptions,
+                prioritizeCompatibility: true
+            )
+            guard retry != stream else {
+                return []
+            }
+            return [
+                PlaybackAttempt(
+                    stream: retry,
+                    mode: .directPreferred,
+                    reasonTag: "compat-progressive"
+                )
+            ]
+        case .dash:
+            break
+        }
+
+        var rawDirectAttempts: [PlaybackAttempt] = []
+        let currentNoAudio = streamWithoutExternalAudioIfPossible(stream)
+        if currentNoAudio != stream {
+            rawDirectAttempts.append(
+                PlaybackAttempt(
+                    stream: currentNoAudio,
+                    mode: .directPreferred,
+                    reasonTag: "compat-current-audio-off"
+                )
+            )
+        }
+
+        for rotated in dashVideoFallbackVariants(from: currentNoAudio) {
+            rawDirectAttempts.append(
+                PlaybackAttempt(
+                    stream: rotated,
+                    mode: .directPreferred,
+                    reasonTag: "compat-current-rotate"
+                )
+            )
+        }
+
+        let lowerQualities = strictlyLowerQualityStreams(from: stream, options: qualityOptions)
+        for lower in lowerQualities {
+            let lowerNoAudio = streamWithoutExternalAudioIfPossible(lower)
+            rawDirectAttempts.append(
+                PlaybackAttempt(
+                    stream: lowerNoAudio,
+                    mode: .directPreferred,
+                    reasonTag: "compat-lower-audio-off"
+                )
+            )
+
+            for rotated in dashVideoFallbackVariants(from: lowerNoAudio) {
+                rawDirectAttempts.append(
+                    PlaybackAttempt(
+                        stream: rotated,
+                        mode: .directPreferred,
+                        reasonTag: "compat-lower-rotate"
+                    )
+                )
+            }
+        }
+
+        var attempts: [PlaybackAttempt] = []
+        var seenKeys = triedAttemptKeys
+        for attempt in rawDirectAttempts {
+            let key = attemptKey(for: attempt.stream, mode: attempt.mode)
+            guard seenKeys.insert(key).inserted else {
+                continue
+            }
+            attempts.append(attempt)
+            if attempts.count >= Self.maxCompatibilityDirectAttempts {
+                break
+            }
+        }
+
+        let proxyBaseStream = attempts.first?.stream ?? currentNoAudio
+        let proxyAttempt = PlaybackAttempt(
+            stream: proxyBaseStream,
+            mode: .proxyOnly,
+            reasonTag: "compat-proxy-last"
+        )
+        let proxyKey = attemptKey(for: proxyAttempt.stream, mode: proxyAttempt.mode)
+        if seenKeys.insert(proxyKey).inserted {
+            attempts.append(proxyAttempt)
+        }
+
+        return attempts
+    }
+
+    private func makeRetryStream(
+        from stream: PlayableStream,
+        qualityOptions: [PlayableStream],
+        prioritizeCompatibility: Bool
+    ) -> PlayableStream {
         switch stream.transport {
         case .progressive(let url, let fallbackURLs):
-            guard let next = fallbackURLs.first else {
+            if prioritizeCompatibility,
+               let strictLower = strictlyLowerQualityStreams(from: stream, options: qualityOptions).first
+            {
+                return strictLower
+            }
+
+            if let next = fallbackURLs.first {
+                let rotatedFallbacks = Array(fallbackURLs.dropFirst()) + [url]
+                return makeStream(
+                    from: stream,
+                    transport: .progressive(url: next, fallbackURLs: rotatedFallbacks)
+                )
+            }
+
+            if prioritizeCompatibility {
                 return stream
             }
-            let rotatedFallbacks = Array(fallbackURLs.dropFirst()) + [url]
-            return PlayableStream(
-                transport: .progressive(url: next, fallbackURLs: rotatedFallbacks),
-                headers: stream.headers,
-                qualityLabel: stream.qualityLabel,
-                format: stream.format
-            )
+
+            guard let downgraded = nextLowerQualityStream(from: stream, options: qualityOptions) else {
+                return stream
+            }
+            return downgraded
         case .dash(let videoURL, let audioURL, let videoFallbackURLs, let audioFallbackURLs):
             let rotatedVideo = rotate(primary: videoURL, fallbacks: videoFallbackURLs)
             let rotatedAudio: (URL?, [URL])
@@ -249,17 +451,270 @@ struct PlayerView: View {
                 rotatedAudio = (nil, [])
             }
 
-            return PlayableStream(
+            let rotatedStream = makeStream(
+                from: stream,
                 transport: .dash(
                     videoURL: rotatedVideo.primary,
                     audioURL: rotatedAudio.0,
                     videoFallbackURLs: rotatedVideo.fallbacks,
                     audioFallbackURLs: rotatedAudio.1
-                ),
-                headers: stream.headers,
-                qualityLabel: stream.qualityLabel,
-                format: stream.format
+                )
             )
+            if rotatedStream != stream {
+                return rotatedStream
+            }
+
+            guard let downgraded = nextLowerQualityStream(from: stream, options: qualityOptions) else {
+                return stream
+            }
+            return downgraded
+        }
+    }
+
+    private func strictlyLowerQualityStreams(from current: PlayableStream, options: [PlayableStream]) -> [PlayableStream] {
+        guard let currentQualityID = current.qualityID else {
+            return []
+        }
+
+        var seen = Set<String>()
+        return options
+            .filter { option in
+                guard option.qualitySelectionKey != current.qualitySelectionKey,
+                      let qualityID = option.qualityID
+                else {
+                    return false
+                }
+                return qualityID < currentQualityID
+            }
+            .sorted { lhs, rhs in
+                let lhsID = lhs.qualityID ?? Int.min
+                let rhsID = rhs.qualityID ?? Int.min
+                return lhsID > rhsID
+            }
+            .filter { option in
+                seen.insert(option.qualitySelectionKey).inserted
+            }
+    }
+
+    private func dashVideoFallbackVariants(from stream: PlayableStream) -> [PlayableStream] {
+        guard case .dash = stream.transport else {
+            return []
+        }
+
+        let originalSignature = streamTransportSignature(stream)
+        var variants: [PlayableStream] = []
+        var seenSignatures = Set<String>()
+        var current = stream
+
+        guard case .dash(_, _, let videoFallbacks, _) = current.transport, !videoFallbacks.isEmpty else {
+            return []
+        }
+
+        for _ in 0..<videoFallbacks.count {
+            let next = rotatedDashVideoStream(from: current)
+            let signature = streamTransportSignature(next)
+            guard signature != originalSignature else {
+                current = next
+                continue
+            }
+            if seenSignatures.insert(signature).inserted {
+                variants.append(next)
+            }
+            current = next
+        }
+
+        return variants
+    }
+
+    private func rotatedDashVideoStream(from stream: PlayableStream) -> PlayableStream {
+        guard case .dash(let videoURL, let audioURL, let videoFallbackURLs, let audioFallbackURLs) = stream.transport else {
+            return stream
+        }
+
+        let rotatedVideo = rotate(primary: videoURL, fallbacks: videoFallbackURLs)
+        return makeStream(
+            from: stream,
+            transport: .dash(
+                videoURL: rotatedVideo.primary,
+                audioURL: audioURL,
+                videoFallbackURLs: rotatedVideo.fallbacks,
+                audioFallbackURLs: audioFallbackURLs
+            )
+        )
+    }
+
+    private func nextLowerQualityStream(from current: PlayableStream, options: [PlayableStream]) -> PlayableStream? {
+        let candidates = options.filter { $0.qualitySelectionKey != current.qualitySelectionKey }
+        guard !candidates.isEmpty else {
+            return nil
+        }
+
+        guard let currentQualityID = current.qualityID else {
+            return candidates.first
+        }
+
+        if let lower = candidates
+            .compactMap({ option -> (Int, PlayableStream)? in
+                guard let qualityID = option.qualityID, qualityID < currentQualityID else {
+                    return nil
+                }
+                return (qualityID, option)
+            })
+            .sorted(by: { $0.0 > $1.0 })
+            .first?.1
+        {
+            return lower
+        }
+
+        return candidates
+            .compactMap({ option -> (Int, PlayableStream)? in
+                guard let qualityID = option.qualityID else {
+                    return nil
+                }
+                return (qualityID, option)
+            })
+            .sorted(by: { $0.0 < $1.0 })
+            .first?.1 ?? candidates.first
+    }
+
+    private func isCompatibilityFailure(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if containsError(nsError, domain: AVFoundationErrorDomain, code: -11828) {
+            return true
+        }
+        if containsError(nsError, domain: "CoreMediaErrorDomain", code: -12881) {
+            return true
+        }
+        if containsError(nsError, domain: NSOSStatusErrorDomain, code: -12847) {
+            return true
+        }
+
+        let message = nsError.localizedDescription.lowercased()
+        if message.contains("cannot open") || message.contains("not supported") {
+            return true
+        }
+
+        if let reason = nsError.localizedFailureReason?.lowercased(),
+           reason.contains("not supported")
+        {
+            return true
+        }
+
+        return false
+    }
+
+    private func containsError(_ root: NSError, domain: String, code: Int) -> Bool {
+        var pending: [NSError] = [root]
+        var visited = Set<ObjectIdentifier>()
+
+        while let current = pending.popLast() {
+            let identifier = ObjectIdentifier(current)
+            guard visited.insert(identifier).inserted else {
+                continue
+            }
+
+            if current.domain == domain, current.code == code {
+                return true
+            }
+
+            if let underlying = current.userInfo[NSUnderlyingErrorKey] as? NSError {
+                pending.append(underlying)
+            }
+        }
+
+        return false
+    }
+
+    private func streamWithoutExternalAudioIfPossible(_ stream: PlayableStream) -> PlayableStream {
+        guard case .dash(let videoURL, let audioURL, let videoFallbackURLs, _) = stream.transport,
+              audioURL != nil
+        else {
+            return stream
+        }
+
+        return makeStream(
+            from: stream,
+            transport: .dash(
+                videoURL: videoURL,
+                audioURL: nil,
+                videoFallbackURLs: videoFallbackURLs,
+                audioFallbackURLs: []
+            )
+        )
+    }
+
+    private func makeStream(from stream: PlayableStream, transport: PlayTransport) -> PlayableStream {
+        PlayableStream(
+            transport: transport,
+            headers: stream.headers,
+            qualityID: stream.qualityID,
+            qualityLabel: stream.qualityLabel,
+            format: stream.format,
+            qualityOptions: stream.qualityOptions
+        )
+    }
+
+    private func attemptKey(for stream: PlayableStream, mode: PlaybackBuildMode) -> String {
+        "\(mode.rawValue)|\(streamTransportSignature(stream))"
+    }
+
+    private func streamTransportSignature(_ stream: PlayableStream) -> String {
+        switch stream.transport {
+        case .progressive(let url, let fallbackURLs):
+            let fallbackText = fallbackURLs.map(\.absoluteString).joined(separator: ",")
+            return "progressive|\(url.absoluteString)|\(fallbackText)"
+        case .dash(let videoURL, let audioURL, let videoFallbackURLs, let audioFallbackURLs):
+            let audioText = audioURL?.absoluteString ?? "nil"
+            let videoFallbackText = videoFallbackURLs.map(\.absoluteString).joined(separator: ",")
+            let audioFallbackText = audioFallbackURLs.map(\.absoluteString).joined(separator: ",")
+            return "dash|\(videoURL.absoluteString)|\(audioText)|\(videoFallbackText)|\(audioFallbackText)"
+        }
+    }
+
+    private func resetRetryStateForFreshPlayback() {
+        pendingRetryAttempts = []
+        triedAttemptKeys = []
+        retryDeadline = nil
+        retryAttemptIndex = 1
+        retryAttemptTotal = 1
+        retryPlanInitialized = false
+        retryReason = .nonCompatibility
+        lastAttemptedMode = .directPreferred
+        lastAttemptReasonTag = "initial"
+    }
+
+    @ViewBuilder
+    private func qualitySelector(for stream: PlayableStream) -> some View {
+        if viewModel.qualityOptions.count > 1 {
+            let selectedKey = viewModel.selectedQualityKey ?? stream.qualitySelectionKey
+            HStack(spacing: 8) {
+                Text("清晰度")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Menu {
+                    ForEach(viewModel.qualityOptions, id: \.qualitySelectionKey) { option in
+                        Button {
+                            resetRetryStateForFreshPlayback()
+                            viewModel.selectQuality(with: option.qualitySelectionKey)
+                        } label: {
+                            if selectedKey == option.qualitySelectionKey {
+                                Label(option.qualityLabel, systemImage: "checkmark")
+                            } else {
+                                Text(option.qualityLabel)
+                            }
+                        }
+                    }
+                } label: {
+                    Label(stream.qualityLabel, systemImage: "chevron.up.chevron.down")
+                        .font(.caption)
+                }
+            }
+            .padding(.horizontal)
+        } else {
+            Text("清晰度: \(stream.qualityLabel)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -286,7 +741,7 @@ struct PlayerView: View {
     private func makePlaybackDiagnostic(from error: Error) -> PlaybackDiagnostic {
         let nsError = error as NSError
         let technical = buildTechnicalDetail(from: nsError, stream: lastAttemptedStream)
-        if nsError.domain == "CoreMediaErrorDomain", nsError.code == -12881 {
+        if containsError(nsError, domain: "CoreMediaErrorDomain", code: -12881) {
             return PlaybackDiagnostic(
                 code: "NB-PL-CM-12881",
                 userMessage: "视频资源加载失败（CoreMedia -12881）。请返回后重试，若仍失败请更换视频测试。",
@@ -374,6 +829,12 @@ struct PlayerView: View {
             "\(nsError.domain)#\(nsError.code): \(nsError.localizedDescription)"
         ]
 
+        details.append("attempt_mode=\(lastAttemptedMode.rawValue)")
+        details.append("attempt_index=\(retryAttemptIndex)")
+        details.append("attempt_total=\(max(retryAttemptTotal, retryAttemptIndex))")
+        details.append("retry_reason=\(retryReason.rawValue)")
+        details.append("attempt_tag=\(lastAttemptReasonTag)")
+
         if let stream {
             switch stream.transport {
             case .progressive(let url, let fallbackURLs):
@@ -435,6 +896,7 @@ struct PlayerView: View {
         playbackItemFactory.releaseResources(for: player.currentItem)
         player.replaceCurrentItem(with: nil)
         lastAttemptedStream = nil
+        resetRetryStateForFreshPlayback()
     }
 }
 
@@ -442,6 +904,17 @@ private struct PlaybackDiagnostic {
     let code: String
     let userMessage: String
     let technicalDetail: String?
+}
+
+private struct PlaybackAttempt {
+    let stream: PlayableStream
+    let mode: PlaybackBuildMode
+    let reasonTag: String
+}
+
+private enum PlaybackRetryReason: String {
+    case compatibility = "compat"
+    case nonCompatibility = "non_compat"
 }
 
 private struct FullScreenPlayerView: View {

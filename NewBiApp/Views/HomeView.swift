@@ -60,7 +60,7 @@ struct HomeView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button("刷新") {
-                    Task { await viewModel.load() }
+                    Task { await viewModel.load(force: true) }
                 }
             }
         }
@@ -68,7 +68,7 @@ struct HomeView: View {
             await viewModel.load()
         }
         .refreshable {
-            await viewModel.load()
+            await viewModel.load(force: true)
         }
     }
 }
@@ -78,7 +78,7 @@ struct VideoCardRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            AsyncImage(url: video.coverURL) { phase in
+            AsyncImage(url: atsSafeImageURL(video.coverURL)) { phase in
                 switch phase {
                 case .success(let image):
                     image
@@ -114,5 +114,18 @@ struct VideoCardRow: View {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    private func atsSafeImageURL(_ url: URL?) -> URL? {
+        guard let url else {
+            return nil
+        }
+        guard url.scheme?.lowercased() == "http" else {
+            return url
+        }
+
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        components?.scheme = "https"
+        return components?.url ?? url
     }
 }

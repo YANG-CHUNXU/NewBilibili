@@ -42,9 +42,11 @@ public enum NativePlaybackProxyUtilities {
         return [
             "#EXTM3U",
             "#EXT-X-VERSION:7",
-            "#EXT-X-TARGETDURATION:6",
+            // Proxy serves one full media object as a single segment; use a large target duration
+            // to avoid HLS validation failures on long-form videos.
+            "#EXT-X-TARGETDURATION:86400",
             "#EXT-X-PLAYLIST-TYPE:VOD",
-            "#EXTINF:6.000,",
+            "#EXTINF:86400.000,",
             segmentURL.absoluteString,
             "#EXT-X-ENDLIST"
         ].joined(separator: "\n")

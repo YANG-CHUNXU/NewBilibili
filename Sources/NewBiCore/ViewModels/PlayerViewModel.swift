@@ -4,6 +4,8 @@ import Combine
 @MainActor
 public final class PlayerViewModel: ObservableObject {
     @Published public private(set) var stream: PlayableStream?
+    @Published public private(set) var qualityOptions: [PlayableStream] = []
+    @Published public private(set) var selectedQualityKey: String?
     @Published public private(set) var isLoading = false
     @Published public private(set) var errorMessage: String?
     @Published public private(set) var errorCode: String?
@@ -35,11 +37,40 @@ public final class PlayerViewModel: ObservableObject {
         clearError()
 
         do {
-            stream = try await biliClient.resolvePlayableStream(bvid: bvid, cid: cid)
+            let resolved = try await biliClient.resolvePlayableStream(bvid: bvid, cid: cid)
+            let normalizedOptions = normalizedQualityOptions(from: resolved)
+            qualityOptions = normalizedOptions
+
+            if let selectedQualityKey,
+               let selected = normalizedOptions.first(where: { $0.qualitySelectionKey == selectedQualityKey })
+            {
+                stream = selected
+            } else if let exact = normalizedOptions.first(where: { $0.qualitySelectionKey == resolved.qualitySelectionKey }) {
+                stream = exact
+            } else {
+                stream = normalizedOptions.first
+            }
+            self.selectedQualityKey = stream?.qualitySelectionKey
         } catch {
             stream = nil
+            qualityOptions = []
+            selectedQualityKey = nil
             reportPlaybackError(error, fallbackCode: "NB-PL-RESOLVE")
         }
+    }
+
+    public func selectQuality(with key: String) {
+        guard let selected = qualityOptions.first(where: { $0.qualitySelectionKey == key }) else {
+            return
+        }
+
+        guard stream?.qualitySelectionKey != selected.qualitySelectionKey else {
+            return
+        }
+
+        stream = selected
+        selectedQualityKey = selected.qualitySelectionKey
+        clearError()
     }
 
     public func recordPlayback(progressSeconds: Double) async {
@@ -71,6 +102,26 @@ public final class PlayerViewModel: ObservableObject {
         errorMessage = nil
         errorCode = nil
         technicalDetail = nil
+    }
+
+    private func normalizedQualityOptions(from stream: PlayableStream) -> [PlayableStream] {
+        let candidates = stream.qualityOptions.isEmpty ? [stream] : stream.qualityOptions
+        var seen = Set<String>()
+        var options: [PlayableStream] = []
+
+        for candidate in candidates {
+            let key = candidate.qualitySelectionKey
+            guard seen.insert(key).inserted else {
+                continue
+            }
+            options.append(candidate)
+        }
+
+        if seen.insert(stream.qualitySelectionKey).inserted {
+            options.insert(stream, at: 0)
+        }
+
+        return options
     }
 
     private static func resolveErrorCode(from error: Error, fallback: String) -> String {

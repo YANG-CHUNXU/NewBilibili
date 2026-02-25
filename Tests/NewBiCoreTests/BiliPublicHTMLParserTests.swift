@@ -90,6 +90,47 @@ final class BiliPublicHTMLParserTests: XCTestCase {
         XCTAssertEqual(stream.headers.referer, "https://www.bilibili.com")
     }
 
+    func testParsePlayableStreamPrefersDashWhenBothDashAndDurlExist() throws {
+        let html = """
+        <!doctype html>
+        <html>
+        <body>
+        <script>
+        window.__playinfo__={
+          "data": {
+            "quality": 80,
+            "accept_quality": [80,64],
+            "accept_description": ["高清 1080P","高清 720P"],
+            "format": "mp4",
+            "durl": [
+              {"url": "https://example.com/video-1080.mp4"}
+            ],
+            "dash": {
+              "video": [
+                {"id": 80, "baseUrl": "https://example.com/video-1080.m4s", "codecs": "avc1.640028", "bandwidth": 2100000},
+                {"id": 64, "baseUrl": "https://example.com/video-720.m4s", "codecs": "avc1.640020", "bandwidth": 1200000}
+              ],
+              "audio": [
+                {"baseUrl": "https://example.com/audio.m4s", "codecs": "mp4a.40.2", "bandwidth": 128000}
+              ]
+            }
+          }
+        };
+        </script>
+        </body>
+        </html>
+        """
+
+        let stream = try parser.parsePlayableStream(from: html)
+        guard case .dash(let videoURL, let audioURL, _, _) = stream.transport else {
+            return XCTFail("expected dash transport")
+        }
+
+        XCTAssertEqual(videoURL.absoluteString, "https://example.com/video-1080.m4s")
+        XCTAssertEqual(audioURL?.absoluteString, "https://example.com/audio.m4s")
+        XCTAssertEqual(stream.qualityOptions.map(\.qualityID), [80, 64])
+    }
+
     func testParsePlayableStreamFromDash() throws {
         let html = try loadFixture("play_page_no_durl")
         let stream = try parser.parsePlayableStream(from: html)
@@ -100,6 +141,9 @@ final class BiliPublicHTMLParserTests: XCTestCase {
 
         XCTAssertEqual(videoURL.absoluteString, "https://example.com/video-avc.m4s")
         XCTAssertEqual(audioURL?.absoluteString, "https://example.com/audio-aac.m4s")
+        XCTAssertEqual(stream.qualityID, 80)
+        XCTAssertEqual(stream.qualityOptions.count, 2)
+        XCTAssertEqual(stream.qualityOptions.map(\.qualityID), [80, 64])
     }
 
     func testParsePlayableStreamDashWithoutAudioDoesNotThrow() throws {
@@ -156,6 +200,45 @@ final class BiliPublicHTMLParserTests: XCTestCase {
 
         XCTAssertEqual(videoURL.absoluteString, "https://example.com/video-1080.m4s")
         XCTAssertEqual(stream.qualityLabel, "高清 1080P")
+        XCTAssertEqual(stream.qualityID, 80)
+    }
+
+    func testParsePlayableStreamDashKeepsSelectableQualityOptions() throws {
+        let html = try loadFixture("play_page_dash_preferred_missing")
+        let stream = try parser.parsePlayableStream(from: html)
+
+        XCTAssertEqual(stream.qualityOptions.map(\.qualityID), [80, 32])
+        XCTAssertEqual(stream.qualityOptions.map(\.qualityLabel), ["高清 1080P", "清晰 480P"])
+    }
+
+    func testParsePlayableStreamDashFallsBackToAVCWhenPreferredQualityCodecIsNotCompatible() throws {
+        let html = try loadFixture("play_page_dash_preferred_non_avc")
+        let stream = try parser.parsePlayableStream(from: html)
+
+        guard case .dash(let videoURL, _, _, _) = stream.transport else {
+            return XCTFail("expected dash transport")
+        }
+
+        XCTAssertEqual(videoURL.absoluteString, "https://example.com/video-480-avc.m4s")
+        XCTAssertEqual(stream.qualityID, 32)
+        XCTAssertEqual(stream.qualityLabel, "清晰 480P")
+        XCTAssertEqual(stream.qualityOptions.map(\.qualityID), [64, 32])
+    }
+
+    func testParsePlayableStreamDashUsesCodecidWhenCodecsFieldIsMissing() throws {
+        let html = """
+        <!doctype html>
+        <html><body><script>
+        window.__playinfo__={"data":{"quality":80,"accept_quality":[80],"accept_description":["高清 1080P"],"dash":{"video":[{"id":80,"baseUrl":"https://example.com/video-av1.m4s","codecid":13,"bandwidth":2100000},{"id":80,"baseUrl":"https://example.com/video-avc.m4s","codecid":7,"bandwidth":1800000}],"audio":[{"baseUrl":"https://example.com/audio-aac.m4s","codecs":"mp4a.40.2","bandwidth":128000}]}}};
+        </script></body></html>
+        """
+        let stream = try parser.parsePlayableStream(from: html)
+
+        guard case .dash(let videoURL, _, _, _) = stream.transport else {
+            return XCTFail("expected dash transport")
+        }
+        XCTAssertEqual(videoURL.absoluteString, "https://example.com/video-avc.m4s")
+        XCTAssertEqual(stream.qualityID, 80)
     }
 
     func testParsePlayableStreamWithoutDurlAndDashThrows() throws {

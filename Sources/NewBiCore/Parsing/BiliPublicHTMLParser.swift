@@ -95,13 +95,20 @@ public struct BiliPublicHTMLParser: Sendable {
         }
 
         let data = JSONHelpers.dict(root["data"]) ?? root
+        let progressive = parseProgressiveStream(data: data)
 
-        if let progressive = parseProgressiveStream(data: data) {
-            return progressive
+        do {
+            if let dash = try parseDashStream(data: data) {
+                return dash
+            }
+        } catch {
+            if progressive == nil {
+                throw error
+            }
         }
 
-        if let dash = try parseDashStream(data: data) {
-            return dash
+        if let progressive {
+            return progressive
         }
 
         throw BiliClientError.noPlayableStream
@@ -286,10 +293,12 @@ public struct BiliPublicHTMLParser: Sendable {
         }
 
         let format = JSONHelpers.string(data["format"]) ?? inferFormat(from: url)
-        let qualityLabel = resolveQualityLabel(data: data, fallbackQuality: nil)
+        let qualityID = JSONHelpers.int(data["quality"])
+        let qualityLabel = resolveQualityLabel(data: data, fallbackQuality: qualityID)
         return PlayableStream(
             transport: .progressive(url: url, fallbackURLs: Array(candidates.dropFirst())),
             headers: .bilibiliDefault,
+            qualityID: qualityID,
             qualityLabel: qualityLabel,
             format: format
         )
@@ -317,6 +326,7 @@ public struct BiliPublicHTMLParser: Sendable {
                 url: firstURL,
                 fallbackURLs: Array(candidates.dropFirst()),
                 codecs: JSONHelpers.string(dict["codecs"]),
+                codecid: JSONHelpers.int(dict["codecid"]),
                 bandwidth: JSONHelpers.int(dict["bandwidth"])
             )
         }
@@ -343,9 +353,14 @@ public struct BiliPublicHTMLParser: Sendable {
         }
 
         let selectedAudio = selectBestAudioTrack(audioTracks)
-
-        var displayData = data
-        displayData["quality"] = selectedVideo.id
+        let format = JSONHelpers.string(data["format"]) ?? "dash"
+        let selectedQualityLabel = qualityLabel(for: selectedVideo.id, data: data)
+        let qualityOptions = dashQualityOptions(
+            from: videoTracks,
+            audioTrack: selectedAudio,
+            data: data,
+            format: format
+        )
 
         return PlayableStream(
             transport: .dash(
@@ -355,9 +370,83 @@ public struct BiliPublicHTMLParser: Sendable {
                 audioFallbackURLs: selectedAudio?.fallbackURLs ?? []
             ),
             headers: .bilibiliDefault,
-            qualityLabel: resolveQualityLabel(data: displayData, fallbackQuality: selectedVideo.id),
-            format: JSONHelpers.string(data["format"]) ?? "dash"
+            qualityID: selectedVideo.id,
+            qualityLabel: selectedQualityLabel,
+            format: format,
+            qualityOptions: mergeQualityOptions(qualityOptions, ensuring: PlayableStream(
+                transport: .dash(
+                    videoURL: selectedVideo.url,
+                    audioURL: selectedAudio?.url,
+                    videoFallbackURLs: selectedVideo.fallbackURLs,
+                    audioFallbackURLs: selectedAudio?.fallbackURLs ?? []
+                ),
+                headers: .bilibiliDefault,
+                qualityID: selectedVideo.id,
+                qualityLabel: selectedQualityLabel,
+                format: format
+            ))
         )
+    }
+
+    private func dashQualityOptions(
+        from videoTracks: [DashVideoTrack],
+        audioTrack: DashAudioTrack?,
+        data: [String: Any],
+        format: String
+    ) -> [PlayableStream] {
+        let grouped = Dictionary(grouping: videoTracks, by: \.id)
+        let bestTrackByQuality: [Int: DashVideoTrack] = grouped.compactMapValues { tracks in
+            tracks.sorted(by: isPreferredVideoTrack).first
+        }
+
+        var orderedQualityIDs: [Int] = []
+        var seen = Set<Int>()
+        let preferredOrder = (JSONHelpers.array(data["accept_quality"]) ?? []).compactMap(JSONHelpers.int)
+        for quality in preferredOrder where bestTrackByQuality[quality] != nil {
+            orderedQualityIDs.append(quality)
+            seen.insert(quality)
+        }
+
+        let remaining = bestTrackByQuality.keys.filter { !seen.contains($0) }.sorted(by: >)
+        orderedQualityIDs.append(contentsOf: remaining)
+
+        return orderedQualityIDs.compactMap { qualityID in
+            guard let videoTrack = bestTrackByQuality[qualityID] else {
+                return nil
+            }
+
+            return PlayableStream(
+                transport: .dash(
+                    videoURL: videoTrack.url,
+                    audioURL: audioTrack?.url,
+                    videoFallbackURLs: videoTrack.fallbackURLs,
+                    audioFallbackURLs: audioTrack?.fallbackURLs ?? []
+                ),
+                headers: .bilibiliDefault,
+                qualityID: qualityID,
+                qualityLabel: qualityLabel(for: qualityID, data: data),
+                format: format
+            )
+        }
+    }
+
+    private func mergeQualityOptions(_ options: [PlayableStream], ensuring current: PlayableStream) -> [PlayableStream] {
+        var seen = Set<String>()
+        var merged: [PlayableStream] = []
+
+        for option in options {
+            let key = option.qualitySelectionKey
+            guard seen.insert(key).inserted else {
+                continue
+            }
+            merged.append(option)
+        }
+
+        if seen.insert(current.qualitySelectionKey).inserted {
+            merged.insert(current, at: 0)
+        }
+
+        return merged
     }
 
     private func parseDashAudioTracks(from rawTracks: [Any]) -> [DashAudioTrack] {
@@ -375,6 +464,7 @@ public struct BiliPublicHTMLParser: Sendable {
                 url: firstURL,
                 fallbackURLs: Array(candidates.dropFirst()),
                 codecs: JSONHelpers.string(dict["codecs"]),
+                codecid: JSONHelpers.int(dict["codecid"]),
                 id: JSONHelpers.int(dict["id"]),
                 bandwidth: JSONHelpers.int(dict["bandwidth"])
             )
@@ -478,33 +568,51 @@ public struct BiliPublicHTMLParser: Sendable {
     }
 
     private func selectBestVideoTrack(_ tracks: [DashVideoTrack], preferredQuality: Int?) -> DashVideoTrack {
-        let qualityMatched = preferredQuality.flatMap { quality in
-            let matches = tracks.filter { $0.id == quality }
-            return matches.isEmpty ? nil : matches
-        }
-        let candidates: [DashVideoTrack]
-        if let qualityMatched {
-            candidates = qualityMatched
-        } else if let maxID = tracks.map(\.id).max() {
-            candidates = tracks.filter { $0.id == maxID }
-        } else {
-            candidates = tracks
+        let globallyPreferred = tracks.sorted(by: isPreferredVideoTrack).first ?? tracks[0]
+        guard let preferredQuality else {
+            return globallyPreferred
         }
 
-        return candidates.sorted { lhs, rhs in
-            let lhsCodec = codecRank(lhs.codecs)
-            let rhsCodec = codecRank(rhs.codecs)
-            if lhsCodec != rhsCodec {
-                return lhsCodec < rhsCodec
-            }
-            if lhs.bandwidth != rhs.bandwidth {
-                return (lhs.bandwidth ?? 0) > (rhs.bandwidth ?? 0)
-            }
-            return lhs.id > rhs.id
-        }.first ?? tracks[0]
+        let qualityMatched = tracks.filter { $0.id == preferredQuality }
+        guard let preferredTrack = qualityMatched.sorted(by: isPreferredVideoTrack).first else {
+            return globallyPreferred
+        }
+
+        // Keep server-selected quality only when it is broadly compatible (AVC),
+        // otherwise prioritize a safer codec to avoid AVFoundation -11828 failures.
+        if codecRank(preferredTrack.codecs, codecid: preferredTrack.codecid) <= 0 {
+            return preferredTrack
+        }
+
+        return globallyPreferred
     }
 
-    private func codecRank(_ codec: String?) -> Int {
+    private func isPreferredVideoTrack(_ lhs: DashVideoTrack, _ rhs: DashVideoTrack) -> Bool {
+        let lhsCodec = codecRank(lhs.codecs, codecid: lhs.codecid)
+        let rhsCodec = codecRank(rhs.codecs, codecid: rhs.codecid)
+        if lhsCodec != rhsCodec {
+            return lhsCodec < rhsCodec
+        }
+        if lhs.bandwidth != rhs.bandwidth {
+            return (lhs.bandwidth ?? 0) > (rhs.bandwidth ?? 0)
+        }
+        return lhs.id > rhs.id
+    }
+
+    private func codecRank(_ codec: String?, codecid: Int?) -> Int {
+        if let codecid {
+            switch codecid {
+            case 7:
+                return 0
+            case 12:
+                return 1
+            case 13:
+                return 3
+            default:
+                break
+            }
+        }
+
         guard let codec = codec?.lowercased() else {
             return 2
         }
@@ -513,6 +621,9 @@ public struct BiliPublicHTMLParser: Sendable {
         }
         if codec.contains("hev") || codec.contains("hvc") || codec.contains("h265") {
             return 1
+        }
+        if codec.contains("av1") || codec.contains("av01") || codec.contains("vp9") || codec.contains("vp09") {
+            return 3
         }
         return 2
     }
@@ -529,15 +640,21 @@ public struct BiliPublicHTMLParser: Sendable {
             return descriptions[index]
         }
 
-        if let first = descriptions.first {
-            return first
-        }
-
         if let current {
             return "Q\(current)"
         }
 
+        if let first = descriptions.first {
+            return first
+        }
+
         return "默认清晰度"
+    }
+
+    private func qualityLabel(for qualityID: Int, data: [String: Any]) -> String {
+        var displayData = data
+        displayData["quality"] = qualityID
+        return resolveQualityLabel(data: displayData, fallbackQuality: qualityID)
     }
 
     private struct DashVideoTrack {
@@ -545,6 +662,7 @@ public struct BiliPublicHTMLParser: Sendable {
         let url: URL
         let fallbackURLs: [URL]
         let codecs: String?
+        let codecid: Int?
         let bandwidth: Int?
     }
 
@@ -552,6 +670,7 @@ public struct BiliPublicHTMLParser: Sendable {
         let url: URL
         let fallbackURLs: [URL]
         let codecs: String?
+        let codecid: Int?
         let id: Int?
         let bandwidth: Int?
     }

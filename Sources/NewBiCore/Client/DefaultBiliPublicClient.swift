@@ -145,16 +145,6 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
                 bvid: bvid
             )
 
-            if case .dash = parsed.transport {
-                if let progressive = try? await resolvePlayableStreamViaPublicAPI(
-                    bvid: bvid,
-                    cid: cid,
-                    preferProgressive: true
-                ) {
-                    return progressive
-                }
-            }
-
             if case .progressive = parsed.transport, !isNativeFriendlyProgressive(parsed) {
                 // Some public videos only expose FLV in durl; prefer DASH to avoid AVFoundation -11828.
                 return try await resolvePlayableStreamViaPublicAPI(
@@ -255,11 +245,24 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
     }
 
     private func applyPlaybackHeaders(to stream: PlayableStream, bvid: String) -> PlayableStream {
-        PlayableStream(
+        let headers = makePlaybackHeaders(for: bvid)
+        let mappedOptions = stream.qualityOptions.map { option in
+            PlayableStream(
+                transport: option.transport,
+                headers: headers,
+                qualityID: option.qualityID,
+                qualityLabel: option.qualityLabel,
+                format: option.format
+            )
+        }
+
+        return PlayableStream(
             transport: stream.transport,
-            headers: makePlaybackHeaders(for: bvid),
+            headers: headers,
+            qualityID: stream.qualityID,
             qualityLabel: stream.qualityLabel,
-            format: stream.format
+            format: stream.format,
+            qualityOptions: mappedOptions
         )
     }
 
@@ -428,13 +431,30 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
     }
 
     private func normalizeImageURL(_ text: String?) -> URL? {
-        guard var text else {
+        guard var text = text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
             return nil
         }
         if text.hasPrefix("//") {
             text = "https:\(text)"
         }
-        return URL(string: text)
+
+        guard let url = URL(string: text) else {
+            return nil
+        }
+
+        if let scheme = url.scheme?.lowercased(), scheme == "https" {
+            return url
+        }
+
+        if let scheme = url.scheme?.lowercased(), scheme == "http" {
+            var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            components?.scheme = "https"
+            if let upgraded = components?.url {
+                return upgraded
+            }
+        }
+
+        return url
     }
 
     private func formatDuration(_ seconds: Int?) -> String? {

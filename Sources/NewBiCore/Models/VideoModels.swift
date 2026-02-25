@@ -129,21 +129,47 @@ public enum PlayTransport: Hashable, Sendable {
 public struct PlayableStream: Hashable, Sendable {
     public let transport: PlayTransport
     public let headers: PlaybackHeaders
+    public let qualityID: Int?
     public let qualityLabel: String
     public let format: String
+    public let qualityOptions: [PlayableStream]
 
-    public init(transport: PlayTransport, headers: PlaybackHeaders, qualityLabel: String, format: String) {
+    public init(
+        transport: PlayTransport,
+        headers: PlaybackHeaders,
+        qualityID: Int? = nil,
+        qualityLabel: String,
+        format: String,
+        qualityOptions: [PlayableStream] = []
+    ) {
         self.transport = transport
         self.headers = headers
+        self.qualityID = qualityID
         self.qualityLabel = qualityLabel
         self.format = format
+        self.qualityOptions = qualityOptions
     }
 
-    public init(url: URL, qualityLabel: String, format: String) {
+    public init(url: URL, qualityID: Int? = nil, qualityLabel: String, format: String) {
         self.transport = .progressive(url: url)
         self.headers = .bilibiliDefault
+        self.qualityID = qualityID
         self.qualityLabel = qualityLabel
         self.format = format
+        self.qualityOptions = []
+    }
+
+    public var qualitySelectionKey: String {
+        if let qualityID {
+            return "q\(qualityID)"
+        }
+
+        switch transport {
+        case .progressive(let url, _):
+            return "p:\(url.absoluteString)"
+        case .dash(let videoURL, _, _, _):
+            return "d:\(videoURL.absoluteString)"
+        }
     }
 }
 

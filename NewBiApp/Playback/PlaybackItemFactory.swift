@@ -2,15 +2,30 @@ import Foundation
 import AVFoundation
 import NewBiCore
 
+enum PlaybackBuildMode: String, Hashable, Sendable {
+    case directPreferred = "direct"
+    case proxyOnly = "proxy"
+}
+
 protocol PlaybackItemFactoryProtocol {
-    func makePlayerItem(from stream: PlayableStream) async throws -> AVPlayerItem
+    func makePlayerItem(from stream: PlayableStream, mode: PlaybackBuildMode) async throws -> AVPlayerItem
     func releaseResources(for item: AVPlayerItem?)
 }
 
-final class PlaybackItemFactory: PlaybackItemFactoryProtocol {
-    init() {}
-
+extension PlaybackItemFactoryProtocol {
     func makePlayerItem(from stream: PlayableStream) async throws -> AVPlayerItem {
+        try await makePlayerItem(from: stream, mode: .directPreferred)
+    }
+}
+
+final class PlaybackItemFactory: PlaybackItemFactoryProtocol {
+    private let resourceLoader: NativePlaybackResourceLoader
+
+    init(resourceLoader: NativePlaybackResourceLoader = .shared) {
+        self.resourceLoader = resourceLoader
+    }
+
+    func makePlayerItem(from stream: PlayableStream, mode: PlaybackBuildMode) async throws -> AVPlayerItem {
         switch stream.transport {
         case .progressive(let url, let fallbackURLs):
             let videoAsset = try await resolveVideoAsset(
@@ -19,6 +34,24 @@ final class PlaybackItemFactory: PlaybackItemFactoryProtocol {
             )
             return AVPlayerItem(asset: videoAsset)
         case .dash(let videoURL, let audioURL, let videoFallbackURLs, let audioFallbackURLs):
+            if mode == .proxyOnly {
+                if audioURL == nil {
+                    let proxyStream = PlayableStream(
+                        transport: .progressive(url: videoURL, fallbackURLs: videoFallbackURLs),
+                        headers: stream.headers,
+                        qualityID: stream.qualityID,
+                        qualityLabel: stream.qualityLabel,
+                        format: stream.format,
+                        qualityOptions: stream.qualityOptions
+                    )
+                    let proxyAsset = try await resourceLoader.makeAsset(for: proxyStream)
+                    return AVPlayerItem(asset: proxyAsset)
+                }
+
+                let proxyAsset = try await resourceLoader.makeAsset(for: stream)
+                return AVPlayerItem(asset: proxyAsset)
+            }
+
             let videoAsset = try await resolveVideoAsset(
                 candidates: [videoURL] + videoFallbackURLs,
                 headers: stream.headers
@@ -35,28 +68,27 @@ final class PlaybackItemFactory: PlaybackItemFactoryProtocol {
             }
 
             let audioCandidates = [audioURL] + audioFallbackURLs
-            let audioAsset: AVURLAsset
-            do {
-                audioAsset = try await resolveAudioAsset(candidates: audioCandidates, headers: stream.headers)
-            } catch {
-                return AVPlayerItem(asset: videoAsset)
-            }
-
-            do {
-                return try await makeDashComposedItem(
+            if let audioAsset = try? await resolveAudioAsset(candidates: audioCandidates, headers: stream.headers) {
+                if let composed = try? await makeDashComposedItem(
                     videoAsset: videoAsset,
                     audioAsset: audioAsset
-                )
-            } catch {
-                // Fallback to video-only to avoid hard "cannot open" failures on problematic audio streams.
-                return AVPlayerItem(asset: videoAsset)
+                ) {
+                    return composed
+                }
             }
+
+            // Proxy merge remains as a fallback path when direct composition fails.
+            if let proxyAsset = try? await resourceLoader.makeAsset(for: stream) {
+                return AVPlayerItem(asset: proxyAsset)
+            }
+
+            // Fallback to video-only to avoid hard "cannot open" failures on problematic audio streams.
+            return AVPlayerItem(asset: videoAsset)
         }
     }
 
     func releaseResources(for item: AVPlayerItem?) {
-        // Direct asset/composition playback has no proxy session to release.
-        _ = item
+        resourceLoader.release(asset: item?.asset)
     }
 
     private func httpAssetOptions(headers: PlaybackHeaders) -> [String: Any] {
@@ -76,14 +108,12 @@ final class PlaybackItemFactory: PlaybackItemFactoryProtocol {
         for candidate in deduplicatedURLs(candidates) {
             let asset = AVURLAsset(url: candidate, options: httpAssetOptions(headers: headers))
             do {
-                let playable = try await asset.load(.isPlayable)
-                guard playable else {
-                    throw BiliClientError.unsupportedDashStream("视频流不可播放: \(candidate.absoluteString)")
-                }
                 let videoTracks = try await asset.loadTracks(withMediaType: .video)
                 if !videoTracks.isEmpty {
                     return asset
                 }
+                // Some DASH resources report isPlayable=false but still expose decodable tracks.
+                throw BiliClientError.unsupportedDashStream("视频轨缺失: \(candidate.absoluteString)")
             } catch {
                 lastError = error
             }
@@ -97,14 +127,11 @@ final class PlaybackItemFactory: PlaybackItemFactoryProtocol {
         for candidate in deduplicatedURLs(candidates) {
             let asset = AVURLAsset(url: candidate, options: httpAssetOptions(headers: headers))
             do {
-                let playable = try await asset.load(.isPlayable)
-                guard playable else {
-                    throw BiliClientError.unsupportedDashStream("音频流不可播放: \(candidate.absoluteString)")
-                }
                 let audioTracks = try await asset.loadTracks(withMediaType: .audio)
                 if !audioTracks.isEmpty {
                     return asset
                 }
+                throw BiliClientError.unsupportedDashStream("音频轨缺失: \(candidate.absoluteString)")
             } catch {
                 lastError = error
             }
@@ -150,16 +177,17 @@ final class PlaybackItemFactory: PlaybackItemFactoryProtocol {
         }
 
         let videoDuration = try await normalizedDuration(for: videoAsset, track: sourceVideoTrack)
-        let audioDuration = try await normalizedDuration(for: audioAsset, track: sourceAudioTrack)
-        let insertDuration = minDuration(videoDuration, audioDuration)
+        let videoRange = try await normalizedSourceRange(for: sourceVideoTrack, targetDuration: videoDuration)
 
-        let videoRange = try await normalizedSourceRange(for: sourceVideoTrack, targetDuration: insertDuration)
-        let audioRange = try await normalizedSourceRange(for: sourceAudioTrack, targetDuration: insertDuration)
+        let audioDuration = try await normalizedDuration(for: audioAsset, track: sourceAudioTrack)
+        let clampedAudioDuration = minDuration(audioDuration, videoRange.duration)
+        let audioRange = try await normalizedSourceRange(for: sourceAudioTrack, targetDuration: clampedAudioDuration)
 
         let timelineStart = minTime(videoRange.start, audioRange.start)
         let videoInsertAt = CMTimeSubtract(videoRange.start, timelineStart)
         let audioInsertAt = CMTimeSubtract(audioRange.start, timelineStart)
 
+        // Keep full video duration. Audio can be shorter, but should not truncate playback length.
         try composedVideoTrack.insertTimeRange(videoRange, of: sourceVideoTrack, at: videoInsertAt)
         composedVideoTrack.preferredTransform = try await sourceVideoTrack.load(.preferredTransform)
         try composedAudioTrack.insertTimeRange(audioRange, of: sourceAudioTrack, at: audioInsertAt)
