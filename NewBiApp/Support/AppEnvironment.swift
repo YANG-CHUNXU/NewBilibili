@@ -76,19 +76,26 @@ final class BiliCookieStore {
             return BiliCookieStatus(isConfigured: false, summary: "未导入 SESSDATA")
         }
 
+        let normalized: String
         do {
-            let normalized = try normalizeSessdata(legacySessdata)
-            try keychainStore.saveSessdata(normalized)
-            userDefaults.removeObject(forKey: sessdataKey)
-            clearBilibiliCookiesFromStorage()
-            applySessdataCookie(normalized)
-            let updatedAt = userDefaults.object(forKey: updatedAtKey) as? Date
-            return makeConfiguredStatus(updatedAt: updatedAt)
+            normalized = try normalizeSessdata(legacySessdata)
         } catch {
             userDefaults.removeObject(forKey: sessdataKey)
             clearBilibiliCookiesFromStorage()
             return BiliCookieStatus(isConfigured: false, summary: "未导入 SESSDATA")
         }
+
+        do {
+            try keychainStore.saveSessdata(normalized)
+            userDefaults.removeObject(forKey: sessdataKey)
+        } catch {
+            // Keep legacy value so migration can retry later and avoid unrecoverable session loss.
+        }
+
+        clearBilibiliCookiesFromStorage()
+        applySessdataCookie(normalized)
+        let updatedAt = userDefaults.object(forKey: updatedAtKey) as? Date
+        return makeConfiguredStatus(updatedAt: updatedAt)
     }
 
     func importSessdata(_ raw: String) throws -> BiliCookieStatus {
