@@ -919,25 +919,10 @@ private enum PlaybackRetryReason: String {
 
 private struct FullScreenPlayerView: View {
     let player: AVPlayer
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            FullScreenPlayerController(player: player)
-                .ignoresSafeArea()
-
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                    .padding(10)
-                    .background(.black.opacity(0.45), in: Circle())
-            }
-            .padding(16)
-            .accessibilityLabel("退出全屏")
-        }
+        FullScreenPlayerController(player: player)
+            .ignoresSafeArea()
     }
 }
 
