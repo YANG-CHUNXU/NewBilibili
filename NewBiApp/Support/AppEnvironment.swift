@@ -43,7 +43,8 @@ final class BiliCookieStore {
     }
 
     func restoreFromPersistedSessdata() -> BiliCookieStatus {
-        if let keychainSessdata = keychainStore.readSessdata() {
+        let keychainResult = keychainStore.readSessdataResult(logFailures: true)
+        if case .found(let keychainSessdata) = keychainResult {
             do {
                 let sessdata = try normalizeSessdata(keychainSessdata)
                 userDefaults.removeObject(forKey: sessdataKey)
@@ -58,6 +59,17 @@ final class BiliCookieStore {
             }
         }
 
+        let legacyStatus = restoreFromLegacySessdata()
+        if legacyStatus.isConfigured {
+            return legacyStatus
+        }
+        if case .failure = keychainResult {
+            return BiliCookieStatus(isConfigured: false, summary: "读取 SESSDATA 失败（详见日志）")
+        }
+        return legacyStatus
+    }
+
+    private func restoreFromLegacySessdata() -> BiliCookieStatus {
         guard let legacySessdata = userDefaults.string(forKey: sessdataKey),
               !legacySessdata.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else {
