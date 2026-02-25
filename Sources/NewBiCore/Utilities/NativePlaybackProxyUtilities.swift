@@ -11,6 +11,24 @@ public enum NativePlaybackProxyUtilities {
         }
     }
 
+    @_spi(PlaybackProxy)
+    public enum RangeProbeResult: Equatable {
+        case supports206
+        case fallback200
+        case failed
+    }
+
+    @_spi(PlaybackProxy)
+    public struct RangeCandidateSelection: Equatable {
+        public let url: URL
+        public let shouldMarkPreferredCandidate: Bool
+
+        public init(url: URL, shouldMarkPreferredCandidate: Bool) {
+            self.url = url
+            self.shouldMarkPreferredCandidate = shouldMarkPreferredCandidate
+        }
+    }
+
     public static func proxyURL(scheme: String, sessionID: UUID, path: String) -> URL? {
         var components = URLComponents()
         components.scheme = scheme
@@ -155,6 +173,33 @@ public enum NativePlaybackProxyUtilities {
         let preferredURL = ordered.remove(at: preferredIndex)
         ordered.insert(preferredURL, at: 0)
         return ordered
+    }
+
+    @_spi(PlaybackProxy)
+    public static func selectRangeCandidate(
+        orderedCandidates: [URL],
+        probeResults: [URL: RangeProbeResult]
+    ) -> RangeCandidateSelection? {
+        var first200Fallback: URL?
+
+        for candidate in orderedCandidates {
+            switch probeResults[candidate] ?? .failed {
+            case .supports206:
+                return RangeCandidateSelection(url: candidate, shouldMarkPreferredCandidate: true)
+            case .fallback200:
+                if first200Fallback == nil {
+                    first200Fallback = candidate
+                }
+            case .failed:
+                continue
+            }
+        }
+
+        if let first200Fallback {
+            return RangeCandidateSelection(url: first200Fallback, shouldMarkPreferredCandidate: false)
+        }
+
+        return nil
     }
 
     private static func normalizedSegmentDuration(_ durationSeconds: Double?) -> Double {

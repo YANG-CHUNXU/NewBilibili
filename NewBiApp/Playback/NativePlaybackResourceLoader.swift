@@ -1,7 +1,7 @@
 import Foundation
 import AVFoundation
 import UniformTypeIdentifiers
-import NewBiCore
+@_spi(PlaybackProxy) import NewBiCore
 
 final class NativePlaybackResourceLoader: NSObject {
     static let shared = NativePlaybackResourceLoader()
@@ -9,6 +9,7 @@ final class NativePlaybackResourceLoader: NSObject {
     private static let proxyScheme = "newbi-proxy"
     private static let sessionTimeout: TimeInterval = 10 * 60
     private static let streamChunkSize = 64 * 1024
+    private static let rangeProbeTimeout: TimeInterval = 4
 
     private let urlSession: URLSession
     private let store: ProxySessionStore
@@ -310,6 +311,41 @@ final class NativePlaybackResourceLoader: NSObject {
             throw BiliClientError.playbackProxyFailed("缺少可用分段地址")
         }
 
+        if let requestedRange = RequestedRange(dataRequest: loadingRequest.dataRequest) {
+            var probeResults: [URL: NativePlaybackProxyUtilities.RangeProbeResult] = [:]
+            var lastError: Error?
+
+            for remoteURL in orderedCandidates {
+                do {
+                    let probeResult = try await probeRangeCapability(
+                        remoteURL,
+                        requestedRange: requestedRange,
+                        headers: headers
+                    )
+                    probeResults[remoteURL] = probeResult
+                } catch {
+                    if isCancellationError(error) {
+                        throw error
+                    }
+                    probeResults[remoteURL] = .failed
+                    lastError = error
+                }
+            }
+
+            guard let selection = NativePlaybackProxyUtilities.selectRangeCandidate(
+                orderedCandidates: orderedCandidates,
+                probeResults: probeResults
+            ) else {
+                throw lastError ?? BiliClientError.playbackProxyFailed("Range 探测未找到可用分段地址")
+            }
+
+            let outcome = try await proxyRemote(selection.url, headers: headers, to: loadingRequest)
+            if selection.shouldMarkPreferredCandidate, outcome.shouldMarkPreferredCandidate {
+                await store.markPreferredCandidate(selection.url, for: lane, in: sessionID)
+            }
+            return
+        }
+
         var lastError: Error?
         for remoteURL in orderedCandidates {
             do {
@@ -327,6 +363,56 @@ final class NativePlaybackResourceLoader: NSObject {
         }
 
         throw lastError ?? BiliClientError.playbackProxyFailed("分段代理失败")
+    }
+
+    private func probeRangeCapability(
+        _ remoteURL: URL,
+        requestedRange: RequestedRange,
+        headers: PlaybackHeaders
+    ) async throws -> NativePlaybackProxyUtilities.RangeProbeResult {
+        var request = URLRequest(url: remoteURL)
+        request.httpMethod = "GET"
+        request.timeoutInterval = Self.rangeProbeTimeout
+        let forwardHeaders = NativePlaybackProxyUtilities.buildForwardHeaders(
+            base: headers,
+            range: requestedRange.probeHeaderValue
+        )
+        for (key, value) in forwardHeaders {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+
+        let bytes: URLSession.AsyncBytes
+        let response: URLResponse
+        do {
+            (bytes, response) = try await urlSession.bytes(for: request)
+        } catch {
+            if isCancellationError(error) {
+                throw CancellationError()
+            }
+            throw BiliClientError.playbackProxyFailed(error.localizedDescription)
+        }
+        defer {
+            bytes.task.cancel()
+        }
+
+        guard let http = response as? HTTPURLResponse else {
+            return .failed
+        }
+
+        switch http.statusCode {
+        case 206:
+            guard let contentRange = http.value(forHTTPHeaderField: "Content-Range"),
+                  let parsedRange = ParsedContentRange.parse(contentRange),
+                  parsedRange.start == requestedRange.start
+            else {
+                return .failed
+            }
+            return .supports206
+        case 200:
+            return .fallback200
+        default:
+            return .failed
+        }
     }
 
     private func proxyRemote(
@@ -620,6 +706,10 @@ private struct RequestedRange {
             return "bytes=\(start)-\(end)"
         }
         return "bytes=\(start)-"
+    }
+
+    var probeHeaderValue: String {
+        "bytes=\(start)-\(start)"
     }
 
     var length: Int64? {
