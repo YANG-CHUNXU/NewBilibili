@@ -22,28 +22,48 @@ final class SwiftDataWatchHistoryRepository: WatchHistoryRepository {
                 bvid: $0.bvid,
                 title: $0.title,
                 watchedAt: $0.watchedAt,
-                progressSeconds: $0.progressSeconds
+                progressSeconds: $0.progressSeconds,
+                cid: $0.cid
             )
         }
     }
 
-    func record(bvid: String, title: String, progressSeconds: Double) async throws {
+    func record(
+        bvid: String,
+        title: String,
+        progressSeconds: Double,
+        watchedAt: Date?,
+        cid: Int?
+    ) async throws {
+        let now = watchedAt ?? Date()
         let entities = try modelContext.fetch(FetchDescriptor<WatchHistoryEntity>())
         if let existing = entities.first(where: { $0.bvid == bvid }) {
             existing.title = title
-            existing.watchedAt = Date()
+            existing.watchedAt = now
             existing.progressSeconds = progressSeconds
+            if let cid {
+                existing.cid = cid
+            }
         } else {
             let entity = WatchHistoryEntity(
                 id: UUID(),
                 bvid: bvid,
                 title: title,
-                watchedAt: Date(),
-                progressSeconds: progressSeconds
+                watchedAt: now,
+                progressSeconds: progressSeconds,
+                cid: cid
             )
             modelContext.insert(entity)
         }
         try modelContext.save()
+    }
+
+    func remove(bvid: String) async throws {
+        let entities = try modelContext.fetch(FetchDescriptor<WatchHistoryEntity>())
+        if let existing = entities.first(where: { $0.bvid == bvid }) {
+            modelContext.delete(existing)
+            try modelContext.save()
+        }
     }
 
     func clear() async throws {

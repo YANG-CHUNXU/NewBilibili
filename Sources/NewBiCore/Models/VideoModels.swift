@@ -195,12 +195,40 @@ public struct WatchHistoryRecord: Identifiable, Hashable, Codable, Sendable {
     public let title: String
     public let watchedAt: Date
     public let progressSeconds: Double
+    public let cid: Int?
 
-    public init(id: UUID, bvid: String, title: String, watchedAt: Date, progressSeconds: Double) {
+    public init(
+        id: UUID,
+        bvid: String,
+        title: String,
+        watchedAt: Date,
+        progressSeconds: Double,
+        cid: Int? = nil
+    ) {
         self.id = id
         self.bvid = bvid
         self.title = title
         self.watchedAt = watchedAt
         self.progressSeconds = progressSeconds
+        self.cid = cid
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case bvid
+        case title
+        case watchedAt
+        case progressSeconds
+        case cid
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        bvid = try container.decode(String.self, forKey: .bvid)
+        title = try container.decode(String.self, forKey: .title)
+        watchedAt = try container.decode(Date.self, forKey: .watchedAt)
+        progressSeconds = try container.decode(Double.self, forKey: .progressSeconds)
+        cid = try container.decodeIfPresent(Int.self, forKey: .cid)
     }
 }

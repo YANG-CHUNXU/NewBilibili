@@ -27,13 +27,22 @@ final class WatchHistoryEntity {
     var title: String
     var watchedAt: Date
     var progressSeconds: Double
+    var cid: Int?
 
-    init(id: UUID, bvid: String, title: String, watchedAt: Date, progressSeconds: Double) {
+    init(
+        id: UUID,
+        bvid: String,
+        title: String,
+        watchedAt: Date,
+        progressSeconds: Double,
+        cid: Int?
+    ) {
         self.id = id
         self.bvid = bvid
         self.title = title
         self.watchedAt = watchedAt
         self.progressSeconds = progressSeconds
+        self.cid = cid
     }
 }
 

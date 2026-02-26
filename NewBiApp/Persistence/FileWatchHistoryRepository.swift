@@ -17,17 +17,41 @@ actor FileWatchHistoryRepository: WatchHistoryRepository {
         cache.sorted { $0.watchedAt > $1.watchedAt }
     }
 
-    func record(bvid: String, title: String, progressSeconds: Double) async throws {
-        cache.removeAll { $0.bvid == bvid }
-        cache.append(
-            WatchHistoryRecord(
-                id: UUID(),
+    func record(
+        bvid: String,
+        title: String,
+        progressSeconds: Double,
+        watchedAt: Date?,
+        cid: Int?
+    ) async throws {
+        let now = watchedAt ?? Date()
+        if let index = cache.firstIndex(where: { $0.bvid == bvid }) {
+            let old = cache[index]
+            cache[index] = WatchHistoryRecord(
+                id: old.id,
                 bvid: bvid,
                 title: title,
-                watchedAt: Date(),
-                progressSeconds: progressSeconds
+                watchedAt: now,
+                progressSeconds: progressSeconds,
+                cid: cid ?? old.cid
             )
-        )
+        } else {
+            cache.append(
+                WatchHistoryRecord(
+                    id: UUID(),
+                    bvid: bvid,
+                    title: title,
+                    watchedAt: now,
+                    progressSeconds: progressSeconds,
+                    cid: cid
+                )
+            )
+        }
+        try persist()
+    }
+
+    func remove(bvid: String) async throws {
+        cache.removeAll { $0.bvid == bvid }
         try persist()
     }
 

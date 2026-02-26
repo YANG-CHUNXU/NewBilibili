@@ -127,8 +127,49 @@ final class PublicWebFetcherSessdataTests: XCTestCase {
         XCTAssertFalse(cookieHeader.localizedCaseInsensitiveContains("SESSDATA="))
     }
 
+    func testInjectsBiliJctFromCredentialProvider() async throws {
+        let (fetcher, _) = makeFetcher(
+            credentialProvider: {
+                BiliCredential(
+                    sessdata: "persisted-sessdata",
+                    biliJct: "csrf-token",
+                    dedeUserID: "123",
+                    updatedAt: Date()
+                )
+            }
+        )
+        primeResponse()
+
+        _ = try await fetcher.fetchJSON(url: URL(string: "https://api.bilibili.com/x/test")!)
+
+        let cookieHeader = CookieCaptureURLProtocol.lastRequest()?.value(forHTTPHeaderField: "Cookie") ?? ""
+        XCTAssertTrue(cookieHeader.contains("SESSDATA=persisted-sessdata"))
+        XCTAssertTrue(cookieHeader.contains("bili_jct=csrf-token"))
+    }
+
+    func testInvalidBiliJctIsIgnored() async throws {
+        let (fetcher, _) = makeFetcher(
+            credentialProvider: {
+                BiliCredential(
+                    sessdata: "persisted-sessdata",
+                    biliJct: "bad;csrf",
+                    dedeUserID: nil,
+                    updatedAt: Date()
+                )
+            }
+        )
+        primeResponse()
+
+        _ = try await fetcher.fetchJSON(url: URL(string: "https://api.bilibili.com/x/test")!)
+
+        let cookieHeader = CookieCaptureURLProtocol.lastRequest()?.value(forHTTPHeaderField: "Cookie") ?? ""
+        XCTAssertTrue(cookieHeader.contains("SESSDATA=persisted-sessdata"))
+        XCTAssertFalse(cookieHeader.contains("bili_jct="))
+    }
+
     private func makeFetcher(
-        sessdataProvider: (@Sendable () -> String?)? = nil
+        sessdataProvider: (@Sendable () -> String?)? = nil,
+        credentialProvider: (@Sendable () -> BiliCredential?)? = nil
     ) -> (PublicWebFetcher, HTTPCookieStorage) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [CookieCaptureURLProtocol.self]
@@ -144,7 +185,8 @@ final class PublicWebFetcherSessdataTests: XCTestCase {
         let fetcher = PublicWebFetcher(
             session: session,
             scheduler: RequestScheduler(maxConcurrentPerHost: 1, minIntervalMs: 0),
-            sessdataProvider: sessdataProvider
+            sessdataProvider: sessdataProvider,
+            credentialProvider: credentialProvider
         )
         return (fetcher, cookieStorage)
     }

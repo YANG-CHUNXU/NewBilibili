@@ -3,6 +3,7 @@ import NewBiCore
 
 struct ContentView: View {
     @EnvironmentObject private var environment: AppEnvironment
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         TabView {
@@ -37,13 +38,20 @@ struct ContentView: View {
                 SubscriptionsView(
                     viewModel: SubscriptionListViewModel(
                         subscriptionRepository: environment.subscriptionRepository,
-                        watchHistoryRepository: environment.watchHistoryRepository
+                        watchHistoryRepository: environment.watchHistoryRepository,
+                        historySyncCoordinator: environment.historySyncCoordinator
                     )
                 )
             }
             .tabItem {
                 Label("订阅", systemImage: "person.crop.circle.badge.plus")
             }
+        }
+        .onAppear {
+            environment.notifySceneActive(true)
+        }
+        .onChange(of: scenePhase) { newValue in
+            environment.notifySceneActive(newValue == .active)
         }
     }
 }

@@ -5,23 +5,30 @@ public final class PublicWebFetcher: @unchecked Sendable {
     private let scheduler: RequestScheduler
     private let warmupGate = WarmupGate()
     private let sessdataProvider: (@Sendable () -> String?)?
+    private let credentialProvider: (@Sendable () -> BiliCredential?)?
     private let desktopUserAgent =
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-    public init(sessdataProvider: (@Sendable () -> String?)? = nil) {
+    public init(
+        sessdataProvider: (@Sendable () -> String?)? = nil,
+        credentialProvider: (@Sendable () -> BiliCredential?)? = nil
+    ) {
         self.session = Self.makeDefaultSession()
         self.scheduler = RequestScheduler()
         self.sessdataProvider = sessdataProvider
+        self.credentialProvider = credentialProvider
     }
 
     public init(
         session: URLSession,
         scheduler: RequestScheduler = RequestScheduler(),
-        sessdataProvider: (@Sendable () -> String?)? = nil
+        sessdataProvider: (@Sendable () -> String?)? = nil,
+        credentialProvider: (@Sendable () -> BiliCredential?)? = nil
     ) {
         self.session = session
         self.scheduler = scheduler
         self.sessdataProvider = sessdataProvider
+        self.credentialProvider = credentialProvider
     }
 
     public func fetchHTML(url: URL) async throws -> String {
@@ -52,6 +59,37 @@ public final class PublicWebFetcher: @unchecked Sendable {
         }
     }
 
+    public func fetchJSON(
+        url: URL,
+        method: String,
+        formBodyFields: [String: String],
+        additionalHeaders: [String: String]
+    ) async throws -> Any {
+        let body = formBodyFields
+            .map { key, value in
+                "\(Self.urlEncode(key))=\(Self.urlEncode(value))"
+            }
+            .sorted()
+            .joined(separator: "&")
+            .data(using: .utf8) ?? Data()
+
+        var headers = additionalHeaders
+        headers["Content-Type"] = "application/x-www-form-urlencoded; charset=utf-8"
+
+        let data = try await fetchData(
+            url: url,
+            accept: "application/json,text/plain,*/*",
+            method: method,
+            body: body,
+            additionalHeaders: headers
+        )
+        do {
+            return try JSONSerialization.jsonObject(with: data)
+        } catch {
+            throw BiliClientError.parseFailed("JSON 解析失败")
+        }
+    }
+
     public func primeBilibiliCookiesIfNeeded() async {
         guard await warmupGate.shouldWarmup(minInterval: 300) else {
             return
@@ -71,6 +109,8 @@ public final class PublicWebFetcher: @unchecked Sendable {
     private func fetchData(
         url: URL,
         accept: String,
+        method: String = "GET",
+        body: Data? = nil,
         additionalHeaders: [String: String] = [:]
     ) async throws -> Data {
         guard let host = url.host?.lowercased() else {
@@ -84,17 +124,22 @@ public final class PublicWebFetcher: @unchecked Sendable {
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 15
+        request.httpMethod = method
+        request.httpBody = body
         request.setValue(desktopUserAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("zh-CN,zh;q=0.9", forHTTPHeaderField: "Accept-Language")
         request.setValue(accept, forHTTPHeaderField: "Accept")
         request.setValue("https://www.bilibili.com", forHTTPHeaderField: "Referer")
         request.setValue("keep-alive", forHTTPHeaderField: "Connection")
         if isBilibiliHost(host),
-           let rawSessdata = sessdataProvider?(),
-           let sessdata = Self.normalizedSessdata(rawSessdata)
+           let credential = resolveCredential()
         {
             request.setValue(
-                makeCookieHeader(url: url, sessdata: sessdata),
+                makeCookieHeader(
+                    url: url,
+                    sessdata: credential.sessdata,
+                    biliJct: credential.biliJct
+                ),
                 forHTTPHeaderField: "Cookie"
             )
         }
@@ -168,16 +213,22 @@ public final class PublicWebFetcher: @unchecked Sendable {
         UInt64((attempt + 1) * 500_000_000)
     }
 
-    private func makeCookieHeader(url: URL, sessdata: String) -> String {
+    private func makeCookieHeader(url: URL, sessdata: String, biliJct: String?) -> String {
         let cookieStorage = session.configuration.httpCookieStorage ?? HTTPCookieStorage.shared
         var cookiePairs: [String] = []
         var hasSessdata = false
+        var hasBiliJct = false
 
         for cookie in cookieStorage.cookies(for: url) ?? [] {
             if cookie.name.caseInsensitiveCompare("SESSDATA") == .orderedSame {
                 if !hasSessdata {
                     cookiePairs.append("SESSDATA=\(sessdata)")
                     hasSessdata = true
+                }
+            } else if cookie.name.caseInsensitiveCompare("bili_jct") == .orderedSame {
+                if let biliJct, !biliJct.isEmpty, !hasBiliJct {
+                    cookiePairs.append("bili_jct=\(biliJct)")
+                    hasBiliJct = true
                 }
             } else {
                 cookiePairs.append("\(cookie.name)=\(cookie.value)")
@@ -186,6 +237,9 @@ public final class PublicWebFetcher: @unchecked Sendable {
 
         if !hasSessdata {
             cookiePairs.append("SESSDATA=\(sessdata)")
+        }
+        if let biliJct, !biliJct.isEmpty, !hasBiliJct {
+            cookiePairs.append("bili_jct=\(biliJct)")
         }
 
         return cookiePairs.joined(separator: "; ")
@@ -207,6 +261,39 @@ public final class PublicWebFetcher: @unchecked Sendable {
         }
 
         return raw
+    }
+
+    private static func normalizedBiliJct(_ rawInput: String?) -> String? {
+        guard let rawInput else {
+            return nil
+        }
+        let raw = rawInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        let invalidChars = CharacterSet(charactersIn: ";\n\r")
+        guard !raw.isEmpty, raw.rangeOfCharacter(from: invalidChars) == nil else {
+            return nil
+        }
+        return raw
+    }
+
+    private func resolveCredential() -> (sessdata: String, biliJct: String?)? {
+        if let credential = credentialProvider?(),
+           let sessdata = Self.normalizedSessdata(credential.sessdata)
+        {
+            return (sessdata, Self.normalizedBiliJct(credential.biliJct))
+        }
+
+        if let rawSessdata = sessdataProvider?(),
+           let sessdata = Self.normalizedSessdata(rawSessdata)
+        {
+            return (sessdata, nil)
+        }
+
+        return nil
+    }
+
+    private static func urlEncode(_ input: String) -> String {
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
+        return input.addingPercentEncoding(withAllowedCharacters: allowed) ?? input
     }
 
     private static func makeDefaultSession() -> URLSession {

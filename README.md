@@ -11,7 +11,8 @@
 - 视频详情：标题、UP、分 P、公开统计数据。
 - 原生播放：支持 `durl` 与 `dash`，包含多路回退与兼容性重试策略。
 - 观看历史：记录最近播放项与进度秒数，可一键清空。
-- 登录态导入：在「订阅」页导入 `SESSDATA`，用于提升公开接口可用性。
+- 登录与同步：支持扫码登录或手动输入 `SESSDATA + bili_jct`。
+- 双向历史同步：播放中每 5 秒上报进度，完播/退出补写；启动与前台每小时自动拉取。
 
 ## 技术实现
 
@@ -32,7 +33,8 @@
 
 - 默认：文件存储（`Application Support/NewBi/subscriptions.json`、`history.json`）。
 - 可选：iOS 17+ 通过环境变量 `NEWBI_ENABLE_SWIFTDATA=1` 启用 SwiftData。
-- `SESSDATA` 使用 Keychain 存储（`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`）。
+- 凭据使用 Keychain 存储（`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`）。
+- 同步元数据持久化在 `Application Support/NewBi/history_sync_meta.json`。
 
 ## 项目结构
 
@@ -88,10 +90,10 @@ swift test
 ## 使用说明（MVP）
 
 1. 进入「订阅」页，添加 UID 或空间链接。
-2. （可选）在同页导入 `SESSDATA`。
+2. 在同页扫码登录或手动导入 `SESSDATA + bili_jct`。
 3. 前往「首页」点击刷新查看聚合视频。
 4. 进入详情后选择分 P 播放。
-5. 返回「订阅」页查看观看历史。
+5. 返回「订阅」页查看观看历史与同步状态，必要时点击「立即同步」。
 
 ## 已知限制
 

@@ -79,7 +79,13 @@ public final class PlayerViewModel: ObservableObject {
         }
 
         do {
-            try await historyRepository.record(bvid: bvid, title: title, progressSeconds: progressSeconds)
+            try await historyRepository.record(
+                bvid: bvid,
+                title: title,
+                progressSeconds: progressSeconds,
+                watchedAt: Date(),
+                cid: cid
+            )
         } catch {
             reportPlaybackError(error, fallbackCode: "NB-PL-HISTORY")
         }
@@ -137,6 +143,8 @@ public final class PlayerViewModel: ObservableObject {
                 return "NB-PL-NO_STREAM"
             case .rateLimited:
                 return "NB-PL-RATE_LIMIT"
+            case .authRequired:
+                return "NB-PL-AUTH"
             case .playbackProxyFailed:
                 return "NB-PL-PROXY"
             case .unsupportedDashStream:

@@ -7,19 +7,26 @@ import SwiftData
 
 struct BiliCookieStatus {
     let isConfigured: Bool
+    let canWriteHistory: Bool
     let summary: String
 }
 
 enum BiliCookieImportError: LocalizedError {
-    case emptyInput
+    case emptySessdata
     case invalidSessdata
+    case missingBiliJct
+    case invalidBiliJct
 
     var errorDescription: String? {
         switch self {
-        case .emptyInput:
+        case .emptySessdata:
             return "SESSDATA 为空"
         case .invalidSessdata:
             return "SESSDATA 格式无效"
+        case .missingBiliJct:
+            return "bili_jct 为空"
+        case .invalidBiliJct:
+            return "bili_jct 格式无效"
         }
     }
 }
@@ -27,135 +34,146 @@ enum BiliCookieImportError: LocalizedError {
 final class BiliCookieStore {
     private let userDefaults: UserDefaults
     private let cookieStorage: HTTPCookieStorage
-    private let keychainStore: SessdataKeychainStore
+    private let credentialStore: BiliCredentialKeychainStore
+    private let legacySessdataStore: SessdataKeychainStore
 
-    private let sessdataKey = "newbi.bilibili.sessdata"
-    private let updatedAtKey = "newbi.bilibili.cookie.updatedAt"
+    private let legacySessdataKey = "newbi.bilibili.sessdata"
 
     init(
         userDefaults: UserDefaults = .standard,
         cookieStorage: HTTPCookieStorage = .shared,
-        keychainStore: SessdataKeychainStore
+        credentialStore: BiliCredentialKeychainStore,
+        legacySessdataStore: SessdataKeychainStore
     ) {
         self.userDefaults = userDefaults
         self.cookieStorage = cookieStorage
-        self.keychainStore = keychainStore
+        self.credentialStore = credentialStore
+        self.legacySessdataStore = legacySessdataStore
     }
 
-    func restoreFromPersistedSessdata() -> BiliCookieStatus {
-        let keychainResult = keychainStore.readSessdataResult(logFailures: true)
-        if case .found(let keychainSessdata) = keychainResult {
-            do {
-                let sessdata = try normalizeSessdata(keychainSessdata)
-                userDefaults.removeObject(forKey: sessdataKey)
-                clearBilibiliCookiesFromStorage()
-                applySessdataCookie(sessdata)
-                let updatedAt = userDefaults.object(forKey: updatedAtKey) as? Date
-                return makeConfiguredStatus(updatedAt: updatedAt)
-            } catch {
-                try? keychainStore.deleteSessdata()
-                clearBilibiliCookiesFromStorage()
-                return BiliCookieStatus(isConfigured: false, summary: "未导入 SESSDATA")
-            }
-        }
-
-        let legacyStatus = restoreFromLegacySessdata()
-        if legacyStatus.isConfigured {
-            return legacyStatus
-        }
-        if case .failure = keychainResult {
-            return BiliCookieStatus(isConfigured: false, summary: "读取 SESSDATA 失败（详见日志）")
-        }
-        return legacyStatus
+    func currentCredential() -> BiliCredential? {
+        credentialStore.readCredential()
     }
 
-    private func restoreFromLegacySessdata() -> BiliCookieStatus {
-        guard let legacySessdata = userDefaults.string(forKey: sessdataKey),
-              !legacySessdata.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else {
-            return BiliCookieStatus(isConfigured: false, summary: "未导入 SESSDATA")
-        }
+    func restoreFromPersistedCredential() -> BiliCookieStatus {
+        credentialStore.migrateLegacySessdataIfNeeded(legacySessdataStore)
+        migrateLegacyUserDefaultsIfNeeded()
 
-        let normalized: String
-        do {
-            normalized = try normalizeSessdata(legacySessdata)
-        } catch {
-            userDefaults.removeObject(forKey: sessdataKey)
+        let result = credentialStore.readCredentialResult(logFailures: true)
+        switch result {
+        case .found(let credential):
             clearBilibiliCookiesFromStorage()
-            return BiliCookieStatus(isConfigured: false, summary: "未导入 SESSDATA")
+            applyCredentialCookies(credential)
+            return makeConfiguredStatus(credential)
+        case .notFound:
+            clearBilibiliCookiesFromStorage()
+            return BiliCookieStatus(
+                isConfigured: false,
+                canWriteHistory: false,
+                summary: "未导入登录态"
+            )
+        case .failure:
+            clearBilibiliCookiesFromStorage()
+            return BiliCookieStatus(
+                isConfigured: false,
+                canWriteHistory: false,
+                summary: "读取登录态失败（详见日志）"
+            )
         }
-
-        do {
-            try keychainStore.saveSessdata(normalized)
-            userDefaults.removeObject(forKey: sessdataKey)
-        } catch {
-            // Keep legacy value so migration can retry later and avoid unrecoverable session loss.
-        }
-
-        clearBilibiliCookiesFromStorage()
-        applySessdataCookie(normalized)
-        let updatedAt = userDefaults.object(forKey: updatedAtKey) as? Date
-        return makeConfiguredStatus(updatedAt: updatedAt)
     }
 
-    func importSessdata(_ raw: String) throws -> BiliCookieStatus {
-        let sessdata = try normalizeSessdata(raw)
-        try keychainStore.saveSessdata(sessdata)
-        clearBilibiliCookiesFromStorage()
-        applySessdataCookie(sessdata)
+    func importManualCredential(sessdataRaw: String, biliJctRaw: String) throws -> BiliCookieStatus {
+        let sessdata = try normalizeCookieValue(sessdataRaw, name: "SESSDATA")
+        let biliJct = try normalizeBiliJct(biliJctRaw)
+        let credential = BiliCredential(
+            sessdata: sessdata,
+            biliJct: biliJct,
+            dedeUserID: nil,
+            updatedAt: Date()
+        )
+        try credentialStore.saveCredential(credential)
+        userDefaults.removeObject(forKey: legacySessdataKey)
 
-        userDefaults.removeObject(forKey: sessdataKey)
-        let now = Date()
-        userDefaults.set(now, forKey: updatedAtKey)
-        return makeConfiguredStatus(updatedAt: now)
+        clearBilibiliCookiesFromStorage()
+        applyCredentialCookies(credential)
+        return makeConfiguredStatus(credential)
+    }
+
+    func importCredentialFromQR(_ credential: BiliCredential) throws -> BiliCookieStatus {
+        let sessdata = try normalizeCookieValue(credential.sessdata, name: "SESSDATA")
+        let normalized = BiliCredential(
+            sessdata: sessdata,
+            biliJct: try normalizeOptionalBiliJct(credential.biliJct),
+            dedeUserID: credential.dedeUserID,
+            updatedAt: credential.updatedAt
+        )
+        try credentialStore.saveCredential(normalized)
+        userDefaults.removeObject(forKey: legacySessdataKey)
+
+        clearBilibiliCookiesFromStorage()
+        applyCredentialCookies(normalized)
+        return makeConfiguredStatus(normalized)
     }
 
     func clearPersistedCookies() -> BiliCookieStatus {
-        userDefaults.removeObject(forKey: sessdataKey)
-        userDefaults.removeObject(forKey: updatedAtKey)
-        try? keychainStore.deleteSessdata()
+        userDefaults.removeObject(forKey: legacySessdataKey)
+        try? credentialStore.deleteCredential()
+        try? legacySessdataStore.deleteSessdata()
         clearBilibiliCookiesFromStorage()
-        return BiliCookieStatus(isConfigured: false, summary: "未导入 SESSDATA")
+        return BiliCookieStatus(
+            isConfigured: false,
+            canWriteHistory: false,
+            summary: "未导入登录态"
+        )
     }
 
-    private func normalizeSessdata(_ raw: String) throws -> String {
+    private func migrateLegacyUserDefaultsIfNeeded() {
+        guard credentialStore.readCredential() == nil else {
+            userDefaults.removeObject(forKey: legacySessdataKey)
+            return
+        }
+        guard let legacySessdata = userDefaults.string(forKey: legacySessdataKey),
+              !legacySessdata.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return
+        }
+
+        guard let normalized = try? normalizeCookieValue(legacySessdata, name: "SESSDATA") else {
+            userDefaults.removeObject(forKey: legacySessdataKey)
+            return
+        }
+        let migrated = BiliCredential(
+            sessdata: normalized,
+            biliJct: nil,
+            dedeUserID: nil,
+            updatedAt: Date()
+        )
+        try? credentialStore.saveCredential(migrated)
+        userDefaults.removeObject(forKey: legacySessdataKey)
+    }
+
+    private func normalizeCookieValue(_ raw: String, name: String) throws -> String {
         var input = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !input.isEmpty else {
-            throw BiliCookieImportError.emptyInput
+            if name.caseInsensitiveCompare("SESSDATA") == .orderedSame {
+                throw BiliCookieImportError.emptySessdata
+            }
+            throw BiliCookieImportError.invalidBiliJct
         }
 
         if input.lowercased().hasPrefix("cookie:") {
             input = String(input.dropFirst("cookie:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        if input.lowercased().hasPrefix("sessdata=") {
-            input = String(input.dropFirst("sessdata=".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowerName = name.lowercased()
+        if input.lowercased().hasPrefix("\(lowerName)=") {
+            input = String(input.dropFirst(lowerName.count + 1)).trimmingCharacters(in: .whitespacesAndNewlines)
         } else if input.contains(";") || input.contains("=") {
-            let tokens = input.components(separatedBy: CharacterSet(charactersIn: ";\n\r"))
-            var found: String?
-            for rawToken in tokens {
-                let token = rawToken.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !token.isEmpty else {
-                    continue
-                }
-                guard let equalIndex = token.firstIndex(of: "=") else {
-                    continue
-                }
-
-                let name = String(token[..<equalIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
-                let value = String(token[token.index(after: equalIndex)...]).trimmingCharacters(in: .whitespacesAndNewlines)
-                if name.caseInsensitiveCompare("SESSDATA") == .orderedSame {
-                    found = value
-                    break
-                }
-            }
-
-            if let found {
-                input = found
+            if let parsed = extractCookieValue(from: input, cookieName: name) {
+                input = parsed
             }
         }
 
-        input = input.trimmingCharacters(in: .whitespacesAndNewlines)
         if input.hasPrefix("\""), input.hasSuffix("\""), input.count >= 2 {
             input.removeFirst()
             input.removeLast()
@@ -166,36 +184,83 @@ final class BiliCookieStore {
         }
 
         let invalidChars = CharacterSet(charactersIn: ";\n\r")
-        if input.isEmpty || input.rangeOfCharacter(from: invalidChars) != nil {
-            throw BiliCookieImportError.invalidSessdata
+        guard !input.isEmpty, input.rangeOfCharacter(from: invalidChars) == nil else {
+            if name.caseInsensitiveCompare("SESSDATA") == .orderedSame {
+                throw BiliCookieImportError.invalidSessdata
+            }
+            throw BiliCookieImportError.invalidBiliJct
         }
-
         return input
     }
 
-    private func applySessdataCookie(_ sessdata: String) {
+    private func normalizeBiliJct(_ raw: String) throws -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw BiliCookieImportError.missingBiliJct
+        }
+        return try normalizeCookieValue(trimmed, name: "bili_jct")
+    }
+
+    private func normalizeOptionalBiliJct(_ raw: String?) throws -> String? {
+        guard let raw else {
+            return nil
+        }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return nil
+        }
+        return try normalizeCookieValue(trimmed, name: "bili_jct")
+    }
+
+    private func extractCookieValue(from cookieHeader: String, cookieName: String) -> String? {
+        let tokens = cookieHeader.components(separatedBy: CharacterSet(charactersIn: ";\n\r"))
+        for rawToken in tokens {
+            let token = rawToken.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !token.isEmpty, let equalIndex = token.firstIndex(of: "=") else {
+                continue
+            }
+            let name = String(token[..<equalIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let value = String(token[token.index(after: equalIndex)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if name.caseInsensitiveCompare(cookieName) == .orderedSame {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private func applyCredentialCookies(_ credential: BiliCredential) {
         let expiry = Date().addingTimeInterval(180 * 24 * 60 * 60)
         let domains = [
             ".bilibili.com",
             "www.bilibili.com",
             "api.bilibili.com",
             "search.bilibili.com",
-            "space.bilibili.com"
+            "space.bilibili.com",
+            "passport.bilibili.com"
         ]
 
         for domain in domains {
-            let properties: [HTTPCookiePropertyKey: Any] = [
-                .domain: domain,
-                .path: "/",
-                .name: "SESSDATA",
-                .value: sessdata,
-                .secure: "TRUE",
-                .expires: expiry
-            ]
-
-            if let cookie = HTTPCookie(properties: properties) {
-                cookieStorage.setCookie(cookie)
+            setCookie(name: "SESSDATA", value: credential.sessdata, domain: domain, expires: expiry)
+            if let biliJct = credential.biliJct, !biliJct.isEmpty {
+                setCookie(name: "bili_jct", value: biliJct, domain: domain, expires: expiry)
             }
+            if let uid = credential.dedeUserID, !uid.isEmpty {
+                setCookie(name: "DedeUserID", value: uid, domain: domain, expires: expiry)
+            }
+        }
+    }
+
+    private func setCookie(name: String, value: String, domain: String, expires: Date) {
+        let properties: [HTTPCookiePropertyKey: Any] = [
+            .domain: domain,
+            .path: "/",
+            .name: name,
+            .value: value,
+            .secure: "TRUE",
+            .expires: expires
+        ]
+        if let cookie = HTTPCookie(properties: properties) {
+            cookieStorage.setCookie(cookie)
         }
     }
 
@@ -203,22 +268,24 @@ final class BiliCookieStore {
         guard let cookies = cookieStorage.cookies else {
             return
         }
-
         for cookie in cookies where cookie.domain.localizedCaseInsensitiveContains("bilibili.com") {
             cookieStorage.deleteCookie(cookie)
         }
     }
 
-    private func makeConfiguredStatus(updatedAt: Date?) -> BiliCookieStatus {
-        let timeText: String
-        if let updatedAt {
-            timeText = updatedAt.formatted(date: .abbreviated, time: .shortened)
-        } else {
-            timeText = "未知时间"
+    private func makeConfiguredStatus(_ credential: BiliCredential) -> BiliCookieStatus {
+        let timeText = credential.updatedAt.formatted(date: .abbreviated, time: .shortened)
+        if credential.canWriteHistory {
+            return BiliCookieStatus(
+                isConfigured: true,
+                canWriteHistory: true,
+                summary: "已登录（双向可用，更新时间：\(timeText)）"
+            )
         }
         return BiliCookieStatus(
             isConfigured: true,
-            summary: "已导入 SESSDATA（更新时间：\(timeText)）"
+            canWriteHistory: false,
+            summary: "已登录（只读：缺少 bili_jct，更新时间：\(timeText)）"
         )
     }
 }
@@ -226,25 +293,39 @@ final class BiliCookieStore {
 @MainActor
 final class AppEnvironment: ObservableObject {
     @Published private(set) var bilibiliCookieConfigured = false
-    @Published private(set) var bilibiliCookieStatusText = "未导入 SESSDATA"
+    @Published private(set) var bilibiliHistoryWriteEnabled = false
+    @Published private(set) var bilibiliCookieStatusText = "未导入登录态"
 
     let biliClient: any BiliPublicClient
+    let biliAuthClient: any BiliAuthClient
     let subscriptionRepository: any SubscriptionRepository
     let watchHistoryRepository: any WatchHistoryRepository
+    let historySyncCoordinator: any WatchHistorySyncCoordinator
     let playbackItemFactory: any PlaybackItemFactoryProtocol
+
     private let cookieStore: BiliCookieStore
+    private let historySyncEngine: HistorySyncEngine
+    private var syncLoopTask: Task<Void, Never>?
+    private var appIsActive = true
     #if canImport(SwiftData)
     private var modelContainerBox: Any?
     #endif
 
     init() {
-        let sessdataKeychainStore = SessdataKeychainStore()
-        self.cookieStore = BiliCookieStore(keychainStore: sessdataKeychainStore)
-        self.biliClient = DefaultBiliPublicClient(
-            fetcher: PublicWebFetcher(sessdataProvider: { [sessdataKeychainStore] in
-                sessdataKeychainStore.readSessdata()
-            })
+        let credentialStore = BiliCredentialKeychainStore()
+        let legacySessdataStore = SessdataKeychainStore()
+        self.cookieStore = BiliCookieStore(
+            credentialStore: credentialStore,
+            legacySessdataStore: legacySessdataStore
         )
+        let credentialProvider: @Sendable () -> BiliCredential? = {
+            credentialStore.readCredential()
+        }
+
+        self.biliClient = DefaultBiliPublicClient(
+            fetcher: PublicWebFetcher(credentialProvider: credentialProvider)
+        )
+        self.biliAuthClient = DefaultBiliAuthClient(fetcher: PublicWebFetcher())
         self.playbackItemFactory = PlaybackItemFactory()
 
         let appSupportURL = Self.resolveAppSupportDirectory()
@@ -257,46 +338,123 @@ final class AppEnvironment: ObservableObject {
             fileURL: appSupportURL.appendingPathComponent("history.json")
         )
 
-        // Default to file repositories for launch stability on beta systems.
-        // To opt-in SwiftData, set NEWBI_ENABLE_SWIFTDATA=1 in scheme env.
+        let localSubscriptionRepo: any SubscriptionRepository
+        let localHistoryRepo: any WatchHistoryRepository
+
         let enableSwiftData = ProcessInfo.processInfo.environment["NEWBI_ENABLE_SWIFTDATA"] == "1"
         if enableSwiftData, #available(iOS 17.0, *) {
             do {
                 let container = try NewBiModelContainerFactory.makeContainer()
                 self.modelContainerBox = container
-                self.subscriptionRepository = SwiftDataSubscriptionRepository(modelContext: container.mainContext)
-                self.watchHistoryRepository = SwiftDataWatchHistoryRepository(modelContext: container.mainContext)
-                refreshCookieStatus()
-                return
+                localSubscriptionRepo = SwiftDataSubscriptionRepository(modelContext: container.mainContext)
+                localHistoryRepo = SwiftDataWatchHistoryRepository(modelContext: container.mainContext)
             } catch {
-                self.subscriptionRepository = fallbackSubscriptionRepo
-                self.watchHistoryRepository = fallbackHistoryRepo
-                refreshCookieStatus()
-                return
+                localSubscriptionRepo = fallbackSubscriptionRepo
+                localHistoryRepo = fallbackHistoryRepo
             }
+        } else {
+            localSubscriptionRepo = fallbackSubscriptionRepo
+            localHistoryRepo = fallbackHistoryRepo
         }
 
-        self.subscriptionRepository = fallbackSubscriptionRepo
-        self.watchHistoryRepository = fallbackHistoryRepo
+        self.subscriptionRepository = localSubscriptionRepo
+
+        let historyClient = DefaultBiliHistoryClient(
+            fetcher: PublicWebFetcher(credentialProvider: credentialProvider)
+        )
+        let syncEngine = HistorySyncEngine(
+            historyClient: historyClient,
+            localRepository: localHistoryRepo,
+            credentialProvider: credentialProvider,
+            metaURL: appSupportURL.appendingPathComponent("history_sync_meta.json")
+        )
+        self.historySyncEngine = syncEngine
+        self.historySyncCoordinator = syncEngine
+        self.watchHistoryRepository = SyncingWatchHistoryRepository(
+            localRepository: localHistoryRepo,
+            syncEngine: syncEngine
+        )
+
         refreshCookieStatus()
+        startSyncLoop()
+
+        Task {
+            await syncEngine.triggerStartupSync()
+        }
     }
 
-    func importBilibiliSessdata(_ raw: String) throws {
-        let status = try cookieStore.importSessdata(raw)
+    deinit {
+        syncLoopTask?.cancel()
+    }
+
+    func importBilibiliCredential(sessdataRaw: String, biliJctRaw: String) throws {
+        let status = try cookieStore.importManualCredential(
+            sessdataRaw: sessdataRaw,
+            biliJctRaw: biliJctRaw
+        )
         bilibiliCookieConfigured = status.isConfigured
+        bilibiliHistoryWriteEnabled = status.canWriteHistory
         bilibiliCookieStatusText = status.summary
+
+        Task {
+            await historySyncEngine.triggerManualSync()
+        }
+    }
+
+    func importBilibiliCredentialFromQR(_ credential: BiliCredential) throws {
+        let status = try cookieStore.importCredentialFromQR(credential)
+        bilibiliCookieConfigured = status.isConfigured
+        bilibiliHistoryWriteEnabled = status.canWriteHistory
+        bilibiliCookieStatusText = status.summary
+
+        Task {
+            await historySyncEngine.triggerManualSync()
+        }
     }
 
     func clearBilibiliCookie() {
         let status = cookieStore.clearPersistedCookies()
         bilibiliCookieConfigured = status.isConfigured
+        bilibiliHistoryWriteEnabled = status.canWriteHistory
         bilibiliCookieStatusText = status.summary
     }
 
+    func triggerManualHistorySync() async {
+        await historySyncEngine.triggerManualSync()
+    }
+
+    func notifySceneActive(_ isActive: Bool) {
+        appIsActive = isActive
+        guard isActive else {
+            return
+        }
+        Task {
+            await historySyncEngine.triggerPeriodicSyncIfNeeded()
+        }
+    }
+
     private func refreshCookieStatus() {
-        let status = cookieStore.restoreFromPersistedSessdata()
+        let status = cookieStore.restoreFromPersistedCredential()
         bilibiliCookieConfigured = status.isConfigured
+        bilibiliHistoryWriteEnabled = status.canWriteHistory
         bilibiliCookieStatusText = status.summary
+    }
+
+    private func startSyncLoop() {
+        syncLoopTask?.cancel()
+        syncLoopTask = Task { @MainActor [weak self] in
+            while let self {
+                do {
+                    try await Task.sleep(nanoseconds: 60_000_000_000)
+                } catch {
+                    return
+                }
+                guard self.appIsActive else {
+                    continue
+                }
+                await self.historySyncEngine.triggerPeriodicSyncIfNeeded()
+            }
+        }
     }
 
     private static func resolveAppSupportDirectory() -> URL {

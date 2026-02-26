@@ -12,6 +12,10 @@ struct PlayerView: View {
     @State private var isPresentingFullScreenPlayer = false
     @State private var statusObserver: NSKeyValueObservation?
     @State private var failedToEndObserver: NSObjectProtocol?
+    @State private var didPlayToEndObserver: NSObjectProtocol?
+    @State private var periodicTimeObserverToken: Any?
+    @State private var lastSyncedProgressSeconds: Double = 0
+    @State private var lastSyncAt: Date = .distantPast
     @State private var isViewVisible = false
     @State private var activePlaybackSessionID = UUID()
     @State private var isRetryingPlayback = false
@@ -172,6 +176,8 @@ struct PlayerView: View {
                 return
             }
             bindFailureObservers(to: item, sessionID: sessionID)
+            lastSyncedProgressSeconds = 0
+            lastSyncAt = .distantPast
             player.pause()
             playbackItemFactory.releaseResources(for: player.currentItem)
             player.replaceCurrentItem(with: item)
@@ -206,6 +212,40 @@ struct PlayerView: View {
                 BiliClientError.playbackProxyFailed("播放中断")
             Task { @MainActor in
                 await self.handlePlaybackFailure(err, sessionID: sessionID)
+            }
+        }
+
+        didPlayToEndObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { _ in
+            let duration = item.duration.seconds
+            let finalSeconds = duration.isFinite && duration > 0 ? duration : self.player.currentTime().seconds
+            Task {
+                await self.viewModel.recordPlayback(progressSeconds: finalSeconds.isFinite ? finalSeconds : 0)
+            }
+        }
+
+        periodicTimeObserverToken = player.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 1, preferredTimescale: 600),
+            queue: .main
+        ) { time in
+            let seconds = time.seconds
+            guard seconds.isFinite, seconds >= 0 else {
+                return
+            }
+            let now = Date()
+            guard now.timeIntervalSince(self.lastSyncAt) >= 5 else {
+                return
+            }
+            guard abs(seconds - self.lastSyncedProgressSeconds) >= 1 || self.lastSyncAt == .distantPast else {
+                return
+            }
+            self.lastSyncAt = now
+            self.lastSyncedProgressSeconds = seconds
+            Task {
+                await self.viewModel.recordPlayback(progressSeconds: seconds)
             }
         }
     }
@@ -817,6 +857,8 @@ struct PlayerView: View {
                 code = "NB-PL-NO_STREAM"
             case .rateLimited:
                 code = "NB-PL-RATE_LIMIT"
+            case .authRequired:
+                code = "NB-PL-AUTH"
             case .playbackProxyFailed:
                 code = "NB-PL-PROXY"
             case .unsupportedDashStream:
@@ -919,6 +961,14 @@ struct PlayerView: View {
         if let failedToEndObserver {
             NotificationCenter.default.removeObserver(failedToEndObserver)
             self.failedToEndObserver = nil
+        }
+        if let didPlayToEndObserver {
+            NotificationCenter.default.removeObserver(didPlayToEndObserver)
+            self.didPlayToEndObserver = nil
+        }
+        if let periodicTimeObserverToken {
+            player.removeTimeObserver(periodicTimeObserverToken)
+            self.periodicTimeObserverToken = nil
         }
     }
 

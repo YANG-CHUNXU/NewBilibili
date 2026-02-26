@@ -42,17 +42,40 @@ public actor InMemoryWatchHistoryRepository: WatchHistoryRepository {
         items.sorted(by: { $0.watchedAt > $1.watchedAt })
     }
 
-    public func record(bvid: String, title: String, progressSeconds: Double) async throws {
-        items.removeAll { $0.bvid == bvid }
+    public func record(
+        bvid: String,
+        title: String,
+        progressSeconds: Double,
+        watchedAt: Date?,
+        cid: Int?
+    ) async throws {
+        let now = watchedAt ?? Date()
+        if let index = items.firstIndex(where: { $0.bvid == bvid }) {
+            let old = items[index]
+            items[index] = WatchHistoryRecord(
+                id: old.id,
+                bvid: bvid,
+                title: title,
+                watchedAt: now,
+                progressSeconds: progressSeconds,
+                cid: cid ?? old.cid
+            )
+            return
+        }
         items.append(
             WatchHistoryRecord(
                 id: UUID(),
                 bvid: bvid,
                 title: title,
-                watchedAt: Date(),
-                progressSeconds: progressSeconds
+                watchedAt: now,
+                progressSeconds: progressSeconds,
+                cid: cid
             )
         )
+    }
+
+    public func remove(bvid: String) async throws {
+        items.removeAll { $0.bvid == bvid }
     }
 
     public func clear() async throws {

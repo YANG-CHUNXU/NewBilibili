@@ -8,8 +8,31 @@ public protocol SubscriptionRepository: Sendable {
 
 public protocol WatchHistoryRepository: Sendable {
     func list() async throws -> [WatchHistoryRecord]
-    func record(bvid: String, title: String, progressSeconds: Double) async throws
+    func record(
+        bvid: String,
+        title: String,
+        progressSeconds: Double,
+        watchedAt: Date?,
+        cid: Int?
+    ) async throws
+    func remove(bvid: String) async throws
     func clear() async throws
+}
+
+public extension WatchHistoryRepository {
+    func record(
+        bvid: String,
+        title: String,
+        progressSeconds: Double
+    ) async throws {
+        try await record(
+            bvid: bvid,
+            title: title,
+            progressSeconds: progressSeconds,
+            watchedAt: nil,
+            cid: nil
+        )
+    }
 }
 
 public protocol BiliPublicClient: Sendable {
