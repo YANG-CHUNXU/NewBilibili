@@ -106,7 +106,7 @@ struct VideoCardRow: View {
                         Text(duration)
                     }
                     if let publishTime = video.publishTime {
-                        Text(publishTime.formatted(date: .abbreviated, time: .shortened))
+                        Text(Self.publishTimeFormatter.string(from: publishTime))
                     }
                 }
                 .font(.caption)
@@ -128,4 +128,13 @@ struct VideoCardRow: View {
         components?.scheme = "https"
         return components?.url ?? url
     }
+
+    private static let publishTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy年M月d日 HH:mm"
+        return formatter
+    }()
 }

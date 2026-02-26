@@ -205,13 +205,20 @@ public struct BiliPublicHTMLParser: Sendable {
     }
 
     private func mapVideoCards(from root: Any) -> [VideoCard] {
+        var seen = Set<String>()
+        var mapped: [VideoCard] = []
+
+        for card in mapDynamicModuleCards(from: root) {
+            guard seen.insert(card.bvid).inserted else {
+                continue
+            }
+            mapped.append(card)
+        }
+
         var candidateDicts: [[String: Any]] = []
         JSONHelpers.collectDicts(in: root, where: { dict in
             JSONHelpers.string(dict["bvid"]) != nil && JSONHelpers.string(dict["title"]) != nil
         }, output: &candidateDicts)
-
-        var seen = Set<String>()
-        var mapped: [VideoCard] = []
 
         for dict in candidateDicts {
             guard let bvid = JSONHelpers.string(dict["bvid"]), !bvid.isEmpty else {
@@ -222,12 +229,7 @@ public struct BiliPublicHTMLParser: Sendable {
             }
 
             let title = htmlEntityDecode(JSONHelpers.string(dict["title"])) ?? ""
-            let author = htmlEntityDecode(
-                JSONHelpers.string(dict["author"]) ??
-                JSONHelpers.string(dict["author_name"]) ??
-                JSONHelpers.string(dict["name"]) ??
-                JSONHelpers.string(dict["uname"])
-            ) ?? "未知UP主"
+            let author = resolveAuthorInfo(from: dict)
             let coverURL = normalizeImageURL(
                 JSONHelpers.string(dict["pic"]) ??
                 JSONHelpers.string(dict["cover"]) ??
@@ -255,8 +257,8 @@ public struct BiliPublicHTMLParser: Sendable {
                     bvid: bvid,
                     title: title,
                     coverURL: coverURL,
-                    authorName: author,
-                    authorUID: JSONHelpers.string(dict["mid"]) ?? JSONHelpers.string(dict["uid"]) ?? JSONHelpers.string(dict["author_mid"]),
+                    authorName: author.name,
+                    authorUID: author.uid,
                     durationText: durationText,
                     publishTime: publishTime
                 )
@@ -264,6 +266,92 @@ public struct BiliPublicHTMLParser: Sendable {
         }
 
         return mapped
+    }
+
+    private func mapDynamicModuleCards(from root: Any) -> [VideoCard] {
+        var candidateItems: [[String: Any]] = []
+        JSONHelpers.collectDicts(in: root, where: { dict in
+            JSONHelpers.dict(dict["modules"]) != nil
+        }, output: &candidateItems)
+
+        var seen = Set<String>()
+        var mapped: [VideoCard] = []
+
+        for item in candidateItems {
+            guard let modules = JSONHelpers.dict(item["modules"]),
+                  let moduleDynamic = JSONHelpers.dict(modules["module_dynamic"]),
+                  let major = JSONHelpers.dict(moduleDynamic["major"]),
+                  let archive = JSONHelpers.dict(major["archive"]),
+                  let bvid = JSONHelpers.string(archive["bvid"]), !bvid.isEmpty,
+                  let rawTitle = JSONHelpers.string(archive["title"]), !rawTitle.isEmpty
+            else {
+                continue
+            }
+            guard seen.insert(bvid).inserted else {
+                continue
+            }
+
+            var authorSource = archive
+            if let moduleAuthor = JSONHelpers.dict(modules["module_author"]) {
+                authorSource["module_author"] = moduleAuthor
+            }
+            let author = resolveAuthorInfo(from: authorSource)
+
+            let coverURL = normalizeImageURL(
+                JSONHelpers.string(archive["cover"]) ??
+                JSONHelpers.string(archive["pic"]) ??
+                JSONHelpers.string(archive["cover_url"])
+            )
+            let publishTime =
+                JSONHelpers.dateFromTimestamp(JSONHelpers.dict(modules["module_author"])?["pub_ts"]) ??
+                JSONHelpers.dateFromTimestamp(archive["pubdate"]) ??
+                JSONHelpers.dateFromTimestamp(archive["ctime"]) ??
+                JSONHelpers.dateFromTimestamp(archive["created"]) ??
+                JSONHelpers.dateFromTimestamp(archive["timestamp"])
+            let durationText =
+                JSONHelpers.string(archive["length"]) ??
+                formatDuration(
+                    JSONHelpers.int(archive["duration"]) ??
+                    JSONHelpers.int(archive["duration_seconds"])
+                )
+
+            mapped.append(
+                VideoCard(
+                    id: bvid,
+                    bvid: bvid,
+                    title: htmlEntityDecode(rawTitle) ?? rawTitle,
+                    coverURL: coverURL,
+                    authorName: author.name,
+                    authorUID: author.uid,
+                    durationText: durationText,
+                    publishTime: publishTime
+                )
+            )
+        }
+
+        return mapped
+    }
+
+    private func resolveAuthorInfo(from dict: [String: Any]) -> (name: String, uid: String?) {
+        let owner = JSONHelpers.dict(dict["owner"])
+        let moduleAuthor = JSONHelpers.dict(dict["module_author"])
+        let name = htmlEntityDecode(
+            JSONHelpers.string(dict["author"]) ??
+            JSONHelpers.string(dict["author_name"]) ??
+            JSONHelpers.string(dict["name"]) ??
+            JSONHelpers.string(dict["uname"]) ??
+            JSONHelpers.string(owner?["name"]) ??
+            JSONHelpers.string(owner?["uname"]) ??
+            JSONHelpers.string(moduleAuthor?["name"])
+        ) ?? "未知UP主"
+        let uid =
+            JSONHelpers.string(dict["mid"]) ??
+            JSONHelpers.string(dict["uid"]) ??
+            JSONHelpers.string(dict["author_mid"]) ??
+            JSONHelpers.string(owner?["mid"]) ??
+            JSONHelpers.string(owner?["uid"]) ??
+            JSONHelpers.string(moduleAuthor?["mid"])
+        return (name, uid)
     }
 
     private func normalizeImageURL(_ text: String?) -> URL? {

@@ -14,6 +14,38 @@ final class BiliPublicHTMLParserTests: XCTestCase {
         XCTAssertEqual(cards.first?.coverURL?.absoluteString, "https://i0.hdslb.com/bfs/archive/cover1.jpg")
     }
 
+    func testParseSubscriptionVideosFallsBackToOwnerName() throws {
+        let html = """
+        <!doctype html>
+        <html><body><script>
+        window.__INITIAL_STATE__={"arcList":{"vlist":[{"bvid":"BV1H88888888","title":"订阅结果Owner","pic":"//i0.hdslb.com/bfs/archive/owner.jpg","owner":{"name":"UP_OWNER","mid":"8008"},"duration":90}]}};
+        </script></body></html>
+        """
+
+        let cards = try parser.parseSubscriptionVideos(from: html)
+
+        XCTAssertEqual(cards.count, 1)
+        XCTAssertEqual(cards.first?.bvid, "BV1H88888888")
+        XCTAssertEqual(cards.first?.authorName, "UP_OWNER")
+        XCTAssertEqual(cards.first?.authorUID, "8008")
+    }
+
+    func testParseSubscriptionVideosFromDynamicModulesUsesModuleAuthor() throws {
+        let html = """
+        <!doctype html>
+        <html><body><script>
+        window.__INITIAL_STATE__={"items":[{"modules":{"module_author":{"mid":"9009","name":"UP_DYNAMIC","pub_ts":1700000300},"module_dynamic":{"major":{"archive":{"bvid":"BV1J99999999","title":"动态投稿","cover":"//i0.hdslb.com/bfs/archive/dynamic.jpg","duration":123}}}}}]};
+        </script></body></html>
+        """
+
+        let cards = try parser.parseSubscriptionVideos(from: html)
+
+        XCTAssertEqual(cards.count, 1)
+        XCTAssertEqual(cards.first?.bvid, "BV1J99999999")
+        XCTAssertEqual(cards.first?.authorName, "UP_DYNAMIC")
+        XCTAssertEqual(cards.first?.authorUID, "9009")
+    }
+
     func testParseSearchVideos() throws {
         let html = try loadFixture("search_page")
         let cards = try parser.parseSearchVideos(from: html)
