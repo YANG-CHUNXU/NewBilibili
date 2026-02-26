@@ -2,24 +2,6 @@ import Foundation
 import XCTest
 @testable import NewBiCore
 
-private actor MockSubscriptionRepository: SubscriptionRepository {
-    let items: [Subscription]
-
-    init(items: [Subscription]) {
-        self.items = items
-    }
-
-    func list() async throws -> [Subscription] {
-        items
-    }
-
-    func add(input: String) async throws -> Subscription {
-        throw BiliClientError.invalidInput("not used")
-    }
-
-    func remove(id: UUID) async throws {}
-}
-
 private actor MockBiliClient: BiliPublicClient {
     enum Mode {
         case success([VideoCard])
@@ -49,6 +31,15 @@ private actor MockBiliClient: BiliPublicClient {
     }
 
     func fetchSubscriptionVideos(uid: String) async throws -> [VideoCard] {
+        switch mode {
+        case .success(let cards):
+            return cards
+        case .failure(let error):
+            throw error
+        }
+    }
+
+    func fetchFollowingVideos(maxPages: Int) async throws -> [VideoCard] {
         switch mode {
         case .success(let cards):
             return cards
@@ -119,6 +110,10 @@ private actor KeywordMockBiliClient: BiliPublicClient {
         []
     }
 
+    func fetchFollowingVideos(maxPages: Int) async throws -> [VideoCard] {
+        []
+    }
+
     func searchVideos(keyword: String, page: Int) async throws -> [VideoCard] {
         searchResultsByKeyword[keyword, default: []]
     }
@@ -179,17 +174,8 @@ final class ViewModelStateTests: XCTestCase {
 
     @MainActor
     func testHomeViewModelSuccessState() async {
-        let subA = Subscription(
-            id: UUID(),
-            uid: "1001",
-            homepageURL: URL(string: "https://space.bilibili.com/1001")!,
-            createdAt: Date()
-        )
-        let repository = MockSubscriptionRepository(items: [subA])
-
         let card = makeCard(bvid: "BV1", title: "ok", durationText: "00:20", publishTime: Date())
         let vm = HomeFeedViewModel(
-            subscriptionRepository: repository,
             biliClient: MockBiliClient(mode: .success([card]))
         )
 
@@ -198,6 +184,57 @@ final class ViewModelStateTests: XCTestCase {
         XCTAssertEqual(vm.videos.count, 1)
         XCTAssertEqual(vm.videos.first?.durationText, "00:20")
         XCTAssertFalse(vm.isLoading)
+    }
+
+    @MainActor
+    func testHomeViewModelRequiresLoginBeforeLoading() async {
+        let card = makeCard(bvid: "BV_LOGIN", title: "login", durationText: "00:20", publishTime: Date())
+        let vm = HomeFeedViewModel(
+            biliClient: MockBiliClient(mode: .success([card])),
+            isAuthenticatedProvider: { false }
+        )
+
+        await vm.load()
+
+        XCTAssertTrue(vm.videos.isEmpty)
+        XCTAssertEqual(vm.errorMessage, BiliClientError.authRequired("请先在“我的”页登录 B 站账号").errorDescription)
+    }
+
+    @MainActor
+    func testHomeViewModelKeepsOnlyRecentDayAndSortsDesc() async {
+        let now = Date()
+        let newest = makeCard(
+            bvid: "BV_NEWEST",
+            title: "newest",
+            durationText: "01:00",
+            publishTime: now.addingTimeInterval(-60)
+        )
+        let olderButWithinDay = makeCard(
+            bvid: "BV_OLDER",
+            title: "older",
+            durationText: "02:00",
+            publishTime: now.addingTimeInterval(-23 * 60 * 60)
+        )
+        let outdated = makeCard(
+            bvid: "BV_OLD",
+            title: "old",
+            durationText: "03:00",
+            publishTime: now.addingTimeInterval(-25 * 60 * 60)
+        )
+        let missingPublishTime = makeCard(
+            bvid: "BV_NIL",
+            title: "nil",
+            durationText: "04:00",
+            publishTime: nil
+        )
+
+        let vm = HomeFeedViewModel(
+            biliClient: MockBiliClient(mode: .success([olderButWithinDay, missingPublishTime, outdated, newest]))
+        )
+
+        await vm.load()
+
+        XCTAssertEqual(vm.videos.map(\.bvid), ["BV_NEWEST", "BV_OLDER"])
     }
 
     @MainActor
@@ -268,13 +305,6 @@ final class ViewModelStateTests: XCTestCase {
 
     @MainActor
     func testHomeViewModelHydratesMissingDurationWithFallbackThenResolved() async {
-        let subA = Subscription(
-            id: UUID(),
-            uid: "1001",
-            homepageURL: URL(string: "https://space.bilibili.com/1001")!,
-            createdAt: Date()
-        )
-        let repository = MockSubscriptionRepository(items: [subA])
         let bvid = "BV1HOMEHYDRATE"
         let card = makeCard(bvid: bvid, title: "home", durationText: nil, publishTime: Date())
         let client = MockBiliClient(
@@ -289,7 +319,6 @@ final class ViewModelStateTests: XCTestCase {
             ]
         )
         let vm = HomeFeedViewModel(
-            subscriptionRepository: repository,
             biliClient: client,
             durationHydrator: VideoDurationHydrator(),
             maxConcurrentDurationHydration: 4

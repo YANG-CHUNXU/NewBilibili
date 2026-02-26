@@ -16,17 +16,6 @@ struct SubscriptionsView: View {
 
     var body: some View {
         List {
-            Section("添加订阅") {
-                TextField("输入 UID 或空间主页链接", text: $viewModel.newSubscriptionInput)
-                    .textInputAutocapitalization(.never)
-                    .keyboardType(.URL)
-
-                Button("添加") {
-                    Task { await viewModel.addSubscription() }
-                }
-                .disabled(viewModel.newSubscriptionInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-
             Section("B站登录态") {
                 Text("手动输入需同时提供 SESSDATA 和 bili_jct。")
                     .font(.caption)
@@ -128,26 +117,6 @@ struct SubscriptionsView: View {
                 }
             }
 
-            Section("已订阅") {
-                if viewModel.subscriptions.isEmpty {
-                    Text("暂无订阅")
-                        .foregroundStyle(.secondary)
-                }
-
-                ForEach(viewModel.subscriptions) { subscription in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("UID: \(subscription.uid)")
-                            .font(.headline)
-                        Text(subscription.homepageURL.absoluteString)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .onDelete { offsets in
-                    Task { await viewModel.removeSubscription(at: offsets) }
-                }
-            }
-
             Section("观看历史") {
                 if viewModel.watchHistory.isEmpty {
                     Text("暂无历史")
@@ -183,7 +152,7 @@ struct SubscriptionsView: View {
                 ProgressView("加载中...")
             }
         }
-        .navigationTitle("订阅")
+        .navigationTitle("我的")
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button("清空历史") {

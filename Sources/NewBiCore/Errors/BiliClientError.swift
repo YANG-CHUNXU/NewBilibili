@@ -21,7 +21,7 @@ public enum BiliClientError: LocalizedError, Equatable, Sendable {
         case .noPlayableStream:
             return "未找到可直接播放的视频流"
         case .rateLimited:
-            return "请求过于频繁或触发风控（如 code -352），建议在“订阅”页导入 SESSDATA 并稍后重试"
+            return "请求过于频繁或触发风控（如 code -352），建议在“我的”页导入 SESSDATA 并稍后重试"
         case .authRequired(let reason):
             return "登录状态失效：\(reason)"
         case .playbackProxyFailed(let reason):

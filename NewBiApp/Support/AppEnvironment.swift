@@ -292,13 +292,14 @@ final class BiliCookieStore {
 
 @MainActor
 final class AppEnvironment: ObservableObject {
+    private static let legacySubscriptionCleanupKey = "newbi.cleanup.legacy-subscription.v1"
+
     @Published private(set) var bilibiliCookieConfigured = false
     @Published private(set) var bilibiliHistoryWriteEnabled = false
     @Published private(set) var bilibiliCookieStatusText = "未导入登录态"
 
     let biliClient: any BiliPublicClient
     let biliAuthClient: any BiliAuthClient
-    let subscriptionRepository: any SubscriptionRepository
     let watchHistoryRepository: any WatchHistoryRepository
     let historySyncCoordinator: any WatchHistorySyncCoordinator
     let playbackItemFactory: any PlaybackItemFactoryProtocol
@@ -331,33 +332,26 @@ final class AppEnvironment: ObservableObject {
         let appSupportURL = Self.resolveAppSupportDirectory()
         try? FileManager.default.createDirectory(at: appSupportURL, withIntermediateDirectories: true)
 
-        let fallbackSubscriptionRepo = FileSubscriptionRepository(
-            fileURL: appSupportURL.appendingPathComponent("subscriptions.json")
-        )
         let fallbackHistoryRepo = FileWatchHistoryRepository(
             fileURL: appSupportURL.appendingPathComponent("history.json")
         )
 
-        let localSubscriptionRepo: any SubscriptionRepository
         let localHistoryRepo: any WatchHistoryRepository
+        var subscriptionCleanupModelContext: Any?
 
         let enableSwiftData = ProcessInfo.processInfo.environment["NEWBI_ENABLE_SWIFTDATA"] == "1"
         if enableSwiftData, #available(iOS 17.0, *) {
             do {
                 let container = try NewBiModelContainerFactory.makeContainer()
                 self.modelContainerBox = container
-                localSubscriptionRepo = SwiftDataSubscriptionRepository(modelContext: container.mainContext)
                 localHistoryRepo = SwiftDataWatchHistoryRepository(modelContext: container.mainContext)
+                subscriptionCleanupModelContext = container.mainContext
             } catch {
-                localSubscriptionRepo = fallbackSubscriptionRepo
                 localHistoryRepo = fallbackHistoryRepo
             }
         } else {
-            localSubscriptionRepo = fallbackSubscriptionRepo
             localHistoryRepo = fallbackHistoryRepo
         }
-
-        self.subscriptionRepository = localSubscriptionRepo
 
         let historyClient = DefaultBiliHistoryClient(
             fetcher: PublicWebFetcher(credentialProvider: credentialProvider)
@@ -373,6 +367,11 @@ final class AppEnvironment: ObservableObject {
         self.watchHistoryRepository = SyncingWatchHistoryRepository(
             localRepository: localHistoryRepo,
             syncEngine: syncEngine
+        )
+
+        performLegacySubscriptionCleanupIfNeeded(
+            appSupportURL: appSupportURL,
+            swiftDataModelContext: subscriptionCleanupModelContext
         )
 
         refreshCookieStatus()
@@ -455,6 +454,39 @@ final class AppEnvironment: ObservableObject {
                 await self.historySyncEngine.triggerPeriodicSyncIfNeeded()
             }
         }
+    }
+
+    private func performLegacySubscriptionCleanupIfNeeded(
+        appSupportURL: URL,
+        swiftDataModelContext: Any?
+    ) {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: Self.legacySubscriptionCleanupKey) else {
+            return
+        }
+
+        let subscriptionsFile = appSupportURL.appendingPathComponent("subscriptions.json")
+        try? FileManager.default.removeItem(at: subscriptionsFile)
+
+        #if canImport(SwiftData)
+        if #available(iOS 17.0, *),
+           let swiftDataModelContext = swiftDataModelContext as? ModelContext
+        {
+            do {
+                let entities = try swiftDataModelContext.fetch(FetchDescriptor<SubscriptionEntity>())
+                for entity in entities {
+                    swiftDataModelContext.delete(entity)
+                }
+                if !entities.isEmpty {
+                    try swiftDataModelContext.save()
+                }
+            } catch {
+                // Best effort cleanup. Existing data does not affect current product flow.
+            }
+        }
+        #endif
+
+        defaults.set(true, forKey: Self.legacySubscriptionCleanupKey)
     }
 
     private static func resolveAppSupportDirectory() -> URL {

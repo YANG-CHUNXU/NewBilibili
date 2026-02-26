@@ -96,6 +96,104 @@ final class DefaultBiliPublicClientTests: XCTestCase {
         XCTAssertEqual(cards.first?.authorUID, "9009")
     }
 
+    func testFetchFollowingVideosSinglePage() async throws {
+        ClientStubURLProtocol.prepare { request in
+            guard let url = request.url else {
+                throw URLError(.badURL)
+            }
+            guard url.path == "/x/polymer/web-dynamic/v1/feed/all" else {
+                throw URLError(.unsupportedURL)
+            }
+
+            return self.jsonResponse(
+                url: url,
+                body: #"{"code":0,"data":{"has_more":false,"offset":"","items":[{"modules":{"module_author":{"mid":"9009","name":"UP_DYNAMIC","pub_ts":1700000300},"module_dynamic":{"major":{"archive":{"bvid":"BV1J99999999","title":"动态投稿","cover":"//i0.hdslb.com/bfs/archive/dynamic.jpg","duration":123}}}}}]}}"#
+            )
+        }
+
+        let client = makeClient()
+        let cards = try await client.fetchFollowingVideos(maxPages: 3)
+
+        XCTAssertEqual(cards.map(\.bvid), ["BV1J99999999"])
+        XCTAssertEqual(cards.first?.authorName, "UP_DYNAMIC")
+    }
+
+    func testFetchFollowingVideosPaginatesByOffset() async throws {
+        ClientStubURLProtocol.prepare { request in
+            guard let url = request.url else {
+                throw URLError(.badURL)
+            }
+            guard url.path == "/x/polymer/web-dynamic/v1/feed/all" else {
+                throw URLError(.unsupportedURL)
+            }
+
+            let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let offset = query.first(where: { $0.name == "offset" })?.value
+            if offset == nil {
+                return self.jsonResponse(
+                    url: url,
+                    body: #"{"code":0,"data":{"has_more":1,"offset":"NEXT_1","items":[{"modules":{"module_author":{"mid":"1001","name":"UP_A","pub_ts":1700000000},"module_dynamic":{"major":{"archive":{"bvid":"BV1A11111111","title":"A","cover":"//i0.hdslb.com/bfs/archive/a.jpg","duration":60}}}}}]}}"#
+                )
+            }
+            if offset == "NEXT_1" {
+                return self.jsonResponse(
+                    url: url,
+                    body: #"{"code":0,"data":{"has_more":0,"offset":"","items":[{"modules":{"module_author":{"mid":"1002","name":"UP_B","pub_ts":1700001000},"module_dynamic":{"major":{"archive":{"bvid":"BV1B22222222","title":"B","cover":"//i0.hdslb.com/bfs/archive/b.jpg","duration":60}}}}}]}}"#
+                )
+            }
+            throw URLError(.unsupportedURL)
+        }
+
+        let client = makeClient()
+        let cards = try await client.fetchFollowingVideos(maxPages: 3)
+
+        XCTAssertEqual(cards.map(\.bvid), ["BV1B22222222", "BV1A11111111"])
+    }
+
+    func testFetchFollowingVideosMapsAuthRequiredCode() async {
+        ClientStubURLProtocol.prepare { request in
+            guard let url = request.url else {
+                throw URLError(.badURL)
+            }
+            return self.jsonResponse(
+                url: url,
+                body: #"{"code":-101,"message":"账号未登录"}"#
+            )
+        }
+
+        let client = makeClient()
+        do {
+            _ = try await client.fetchFollowingVideos(maxPages: 1)
+            XCTFail("expected authRequired")
+        } catch let error as BiliClientError {
+            XCTAssertEqual(error, .authRequired("账号未登录"))
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    func testFetchFollowingVideosMapsRateLimitedCode() async {
+        ClientStubURLProtocol.prepare { request in
+            guard let url = request.url else {
+                throw URLError(.badURL)
+            }
+            return self.jsonResponse(
+                url: url,
+                body: #"{"code":-352,"message":"风控"}"#
+            )
+        }
+
+        let client = makeClient()
+        do {
+            _ = try await client.fetchFollowingVideos(maxPages: 1)
+            XCTFail("expected rateLimited")
+        } catch let error as BiliClientError {
+            XCTAssertEqual(error, .rateLimited)
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
     private func makeClient() -> DefaultBiliPublicClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [ClientStubURLProtocol.self]

@@ -4,15 +4,17 @@ import Combine
 @MainActor
 public final class HomeFeedViewModel: ObservableObject {
     private static let durationUnknownText = "未知时长"
+    private static let followingWindowSeconds: TimeInterval = 24 * 60 * 60
+    private static let maxFollowingPages = 3
+    private static let mergedLimit = 100
 
     @Published public private(set) var videos: [VideoCard] = []
     @Published public private(set) var isLoading = false
     @Published public private(set) var errorMessage: String?
 
     private let automaticReloadCooldown: TimeInterval
-    private let maxConcurrentSubscriptionFetches: Int
     private let maxConcurrentDurationHydration: Int
-    private let subscriptionRepository: any SubscriptionRepository
+    private let isAuthenticatedProvider: () -> Bool
     private let biliClient: any BiliPublicClient
     private let durationHydrator: VideoDurationHydrator
     private var lastLoadAt: Date?
@@ -21,36 +23,32 @@ public final class HomeFeedViewModel: ObservableObject {
     private var durationHydrationToken = UUID()
 
     public convenience init(
-        subscriptionRepository: any SubscriptionRepository,
         biliClient: any BiliPublicClient,
         automaticReloadCooldown: TimeInterval = 30,
-        maxConcurrentSubscriptionFetches: Int = 2,
-        maxConcurrentDurationHydration: Int = 4
+        maxConcurrentDurationHydration: Int = 4,
+        isAuthenticatedProvider: @escaping () -> Bool = { true }
     ) {
         self.init(
-            subscriptionRepository: subscriptionRepository,
             biliClient: biliClient,
             automaticReloadCooldown: automaticReloadCooldown,
-            maxConcurrentSubscriptionFetches: maxConcurrentSubscriptionFetches,
             durationHydrator: .shared,
-            maxConcurrentDurationHydration: maxConcurrentDurationHydration
+            maxConcurrentDurationHydration: maxConcurrentDurationHydration,
+            isAuthenticatedProvider: isAuthenticatedProvider
         )
     }
 
     init(
-        subscriptionRepository: any SubscriptionRepository,
         biliClient: any BiliPublicClient,
         automaticReloadCooldown: TimeInterval = 30,
-        maxConcurrentSubscriptionFetches: Int = 2,
         durationHydrator: VideoDurationHydrator,
-        maxConcurrentDurationHydration: Int = 4
+        maxConcurrentDurationHydration: Int = 4,
+        isAuthenticatedProvider: @escaping () -> Bool = { true }
     ) {
-        self.subscriptionRepository = subscriptionRepository
         self.biliClient = biliClient
         self.automaticReloadCooldown = max(0, automaticReloadCooldown)
-        self.maxConcurrentSubscriptionFetches = max(1, maxConcurrentSubscriptionFetches)
         self.durationHydrator = durationHydrator
         self.maxConcurrentDurationHydration = max(1, maxConcurrentDurationHydration)
+        self.isAuthenticatedProvider = isAuthenticatedProvider
     }
 
     public func load(force: Bool = false) async {
@@ -73,70 +71,23 @@ public final class HomeFeedViewModel: ObservableObject {
         }
         errorMessage = nil
 
+        guard isAuthenticatedProvider() else {
+            videos = []
+            didHitRateLimit = false
+            errorMessage = BiliClientError.authRequired("请先在“我的”页登录 B 站账号").errorDescription
+            return
+        }
+
         do {
-            let subscriptions = try await subscriptionRepository.list()
-            if subscriptions.isEmpty {
-                videos = []
-                didHitRateLimit = false
-                return
-            }
-
-            var lists: [[VideoCard]] = []
-            var failureMessages: [String] = []
-            var rateLimitedFailures = 0
-            var startIndex = 0
-
-            while startIndex < subscriptions.count {
-                let endIndex = min(startIndex + maxConcurrentSubscriptionFetches, subscriptions.count)
-                let batch = subscriptions[startIndex..<endIndex]
-
-                await withTaskGroup(of: Result<[VideoCard], Error>.self) { group in
-                    for subscription in batch {
-                        group.addTask {
-                            do {
-                                let cards = try await self.biliClient.fetchSubscriptionVideos(uid: subscription.uid)
-                                return .success(cards)
-                            } catch {
-                                return .failure(error)
-                            }
-                        }
-                    }
-
-                    for await result in group {
-                        switch result {
-                        case .success(let cards):
-                            lists.append(cards)
-                        case .failure(let error):
-                            if let known = error as? BiliClientError, known == .rateLimited {
-                                rateLimitedFailures += 1
-                            }
-                            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                            failureMessages.append(message)
-                        }
-                    }
+            let cards = try await biliClient.fetchFollowingVideos(maxPages: Self.maxFollowingPages)
+            let cutoff = Date().addingTimeInterval(-Self.followingWindowSeconds)
+            let oneDayCards = cards.filter { card in
+                guard let publishTime = card.publishTime else {
+                    return false
                 }
-
-                startIndex = endIndex
+                return publishTime >= cutoff
             }
-
-            if lists.isEmpty, !failureMessages.isEmpty {
-                if rateLimitedFailures == failureMessages.count {
-                    throw BiliClientError.rateLimited
-                }
-                let sample = failureMessages.prefix(2).joined(separator: "；")
-                throw BiliClientError.networkFailed("全部订阅拉取失败。\(sample)")
-            }
-
-            if !failureMessages.isEmpty {
-                if rateLimitedFailures == failureMessages.count {
-                    errorMessage = "部分订阅触发风控（如 -352），建议在“订阅”页导入 SESSDATA 后重试。"
-                } else {
-                    let sample = failureMessages.prefix(1).joined(separator: "；")
-                    errorMessage = "部分订阅加载失败：\(sample)"
-                }
-            }
-
-            let merged = HomeFeedAssembler.merge(lists, limit: 100)
+            let merged = HomeFeedAssembler.merge([oneDayCards], limit: Self.mergedLimit)
             let pendingBVIDs = Set(merged.compactMap { video in
                 video.durationText == nil ? video.bvid : nil
             })

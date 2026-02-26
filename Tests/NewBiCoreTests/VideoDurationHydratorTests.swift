@@ -24,6 +24,10 @@ private actor DurationHydratorMockClient: BiliPublicClient {
         []
     }
 
+    func fetchFollowingVideos(maxPages: Int) async throws -> [VideoCard] {
+        []
+    }
+
     func searchVideos(keyword: String, page: Int) async throws -> [VideoCard] {
         []
     }

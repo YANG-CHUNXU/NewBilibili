@@ -2,6 +2,7 @@ import SwiftUI
 import NewBiCore
 
 struct HomeView: View {
+    @EnvironmentObject private var environment: AppEnvironment
     @StateObject private var viewModel: HomeFeedViewModel
     private let biliClient: any BiliPublicClient
     private let historyRepository: any WatchHistoryRepository
@@ -30,7 +31,7 @@ struct HomeView: View {
 
             if viewModel.videos.isEmpty, !viewModel.isLoading {
                 Section {
-                    Text("暂无内容，请先在订阅页添加 UP 主")
+                    Text("近1天暂无更新")
                         .foregroundStyle(.secondary)
                 }
             }
@@ -56,7 +57,7 @@ struct HomeView: View {
                 ProgressView("加载中...")
             }
         }
-        .navigationTitle("订阅聚合")
+        .navigationTitle("关注更新")
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button("刷新") {
@@ -69,6 +70,9 @@ struct HomeView: View {
         }
         .refreshable {
             await viewModel.load(force: true)
+        }
+        .onChange(of: environment.bilibiliCookieConfigured) { _ in
+            Task { await viewModel.load(force: true) }
         }
     }
 }

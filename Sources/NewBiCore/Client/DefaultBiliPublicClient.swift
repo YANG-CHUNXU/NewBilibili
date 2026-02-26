@@ -1,6 +1,12 @@
 import Foundation
 
 public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendable {
+    private struct FollowingFeedPage {
+        let cards: [VideoCard]
+        let nextOffset: String?
+        let hasMore: Bool
+    }
+
     private let fetcher: PublicWebFetcher
     private let parser: BiliPublicHTMLParser
     private let cache: VideoCardMemoryCache
@@ -13,6 +19,38 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
         self.fetcher = fetcher
         self.parser = parser
         self.cache = cache
+    }
+
+    public func fetchFollowingVideos(maxPages: Int) async throws -> [VideoCard] {
+        let cappedPages = max(1, maxPages)
+        let cacheKey = "following:\(cappedPages)"
+        if let cached = await cache.get(cacheKey) {
+            return cached
+        }
+
+        var pages: [[VideoCard]] = []
+        var offset: String?
+        var fetchedPages = 0
+
+        while fetchedPages < cappedPages {
+            let page = try await fetchFollowingVideoPage(offset: offset)
+            pages.append(page.cards)
+            fetchedPages += 1
+
+            guard fetchedPages < cappedPages,
+                  page.hasMore,
+                  let nextOffset = page.nextOffset,
+                  !nextOffset.isEmpty,
+                  nextOffset != offset
+            else {
+                break
+            }
+            offset = nextOffset
+        }
+
+        let merged = HomeFeedAssembler.merge(pages, limit: 300)
+        await cache.set(cacheKey, value: merged)
+        return merged
     }
 
     public func fetchSubscriptionVideos(uid: String) async throws -> [VideoCard] {
@@ -337,6 +375,46 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
         return try await fetchVideoCardsFromPublicJSON(url: url, source: "动态")
     }
 
+    private func fetchFollowingVideoPage(offset: String?) async throws -> FollowingFeedPage {
+        var components = URLComponents(string: "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/all")
+        var queryItems: [URLQueryItem] = [
+            URLQueryItem(name: "type", value: "video")
+        ]
+        if let offset, !offset.isEmpty {
+            queryItems.append(URLQueryItem(name: "offset", value: offset))
+        }
+        components?.queryItems = queryItems
+
+        guard let url = components?.url else {
+            throw BiliClientError.invalidInput("关注流参数无效")
+        }
+
+        do {
+            let json = try await fetcher.fetchJSON(url: url)
+            let cards = try parseVideoCardsFromPublicJSON(json, source: "关注动态")
+            let pagination = parseFollowingPagination(from: json)
+            return FollowingFeedPage(
+                cards: cards,
+                nextOffset: pagination.nextOffset,
+                hasMore: pagination.hasMore
+            )
+        } catch {
+            guard isRateLimitedError(error) else {
+                throw error
+            }
+
+            await fetcher.primeBilibiliCookiesIfNeeded()
+            let retriedJSON = try await fetcher.fetchJSON(url: url)
+            let cards = try parseVideoCardsFromPublicJSON(retriedJSON, source: "关注动态")
+            let pagination = parseFollowingPagination(from: retriedJSON)
+            return FollowingFeedPage(
+                cards: cards,
+                nextOffset: pagination.nextOffset,
+                hasMore: pagination.hasMore
+            )
+        }
+    }
+
     private func fetchSearchVideosFromPublicAPI(keyword: String, page: Int) async throws -> [VideoCard] {
         var components = URLComponents(string: "https://api.bilibili.com/x/web-interface/search/type")
         components?.queryItems = [
@@ -519,6 +597,8 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
 
     private func mapPublicAPICodeToError(code: Int, message: String, source: String) -> BiliClientError {
         switch code {
+        case -101, -111, -401:
+            return .authRequired(message)
         case -352, -412, -509:
             return .rateLimited
         default:
@@ -558,6 +638,55 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
         }
 
         return url
+    }
+
+    private func parseFollowingPagination(from root: Any) -> (nextOffset: String?, hasMore: Bool) {
+        let top = JSONHelpers.dict(root)
+        let data = JSONHelpers.dict(top?["data"])
+        let nextOffset = resolveNonEmptyString(
+            from: [
+                data?["offset"],
+                data?["next_offset"],
+                data?["offset_str"],
+                top?["offset"]
+            ]
+        )
+        let hasMore = resolveBool(data?["has_more"]) ??
+            resolveBool(JSONHelpers.dict(data?["page"])?["has_more"]) ??
+            (nextOffset != nil)
+        return (nextOffset, hasMore)
+    }
+
+    private func resolveNonEmptyString(from values: [Any?]) -> String? {
+        for value in values {
+            guard let text = JSONHelpers.string(value)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !text.isEmpty
+            else {
+                continue
+            }
+            return text
+        }
+        return nil
+    }
+
+    private func resolveBool(_ value: Any?) -> Bool? {
+        if let bool = value as? Bool {
+            return bool
+        }
+        if let number = value as? NSNumber {
+            return number.boolValue
+        }
+        if let text = value as? String {
+            switch text.lowercased() {
+            case "1", "true":
+                return true
+            case "0", "false":
+                return false
+            default:
+                return nil
+            }
+        }
+        return nil
     }
 
     private func formatDuration(_ seconds: Int?) -> String? {

@@ -10,8 +10,10 @@ struct ContentView: View {
             NavigationStack {
                 HomeView(
                     viewModel: HomeFeedViewModel(
-                        subscriptionRepository: environment.subscriptionRepository,
-                        biliClient: environment.biliClient
+                        biliClient: environment.biliClient,
+                        isAuthenticatedProvider: {
+                            environment.bilibiliCookieConfigured
+                        }
                     ),
                     biliClient: environment.biliClient,
                     historyRepository: environment.watchHistoryRepository,
@@ -37,14 +39,13 @@ struct ContentView: View {
             NavigationStack {
                 SubscriptionsView(
                     viewModel: SubscriptionListViewModel(
-                        subscriptionRepository: environment.subscriptionRepository,
                         watchHistoryRepository: environment.watchHistoryRepository,
                         historySyncCoordinator: environment.historySyncCoordinator
                     )
                 )
             }
             .tabItem {
-                Label("订阅", systemImage: "person.crop.circle.badge.plus")
+                Label("我的", systemImage: "person.crop.circle")
             }
         }
         .onAppear {

@@ -23,11 +23,9 @@
 		C5F73DBFF5046383AB5AB282 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 861342B35FDB7A9BC28B6F65 /* LaunchScreen.storyboard */; };
 		D18B2A2EAC4B3308B893272D /* NewBiApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 294F6CC2FD9EB11AD2DE9B2D /* NewBiApp.swift */; };
 		D1D5B090353CBD0411B608EA /* BiliCredentialKeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CB60C30DC455A3C0E69359E /* BiliCredentialKeychainStore.swift */; };
-		D2672D0A8F68F21A151BB500 /* FileSubscriptionRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 686BC352BB0143DCE1F6BE3F /* FileSubscriptionRepository.swift */; };
 		D87FDE414EA82EEB58FA946C /* SwiftDataModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58FD318DE433BE535EAF7F4C /* SwiftDataModels.swift */; };
 		DDA66EDCE177217EFFE2BD6E /* SwiftDataWatchHistoryRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07072CD24D3A0EBEACABE6A8 /* SwiftDataWatchHistoryRepository.swift */; };
 		E4223143D17571609DA19215 /* AppEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 478142C78A7D2A69B95EAB31 /* AppEnvironment.swift */; };
-		E92103A06DB259BC66C487AD /* SwiftDataSubscriptionRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E9D6FF8144278A660A180E6 /* SwiftDataSubscriptionRepository.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -37,13 +35,11 @@
 		0B8AE54DC4DCB58AEE8E43DE /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		1707D239E6D574F92C2EFD8B /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		294F6CC2FD9EB11AD2DE9B2D /* NewBiApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewBiApp.swift; sourceTree = "<group>"; };
-		2E9D6FF8144278A660A180E6 /* SwiftDataSubscriptionRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftDataSubscriptionRepository.swift; sourceTree = "<group>"; };
 		3CB60C30DC455A3C0E69359E /* BiliCredentialKeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BiliCredentialKeychainStore.swift; sourceTree = "<group>"; };
 		4769AD346940BDDDBCE45063 /* FileWatchHistoryRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileWatchHistoryRepository.swift; sourceTree = "<group>"; };
 		478142C78A7D2A69B95EAB31 /* AppEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppEnvironment.swift; sourceTree = "<group>"; };
 		4A8A309176B2A07E67AE8F02 /* NewBi.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NewBi.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		58FD318DE433BE535EAF7F4C /* SwiftDataModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftDataModels.swift; sourceTree = "<group>"; };
-		686BC352BB0143DCE1F6BE3F /* FileSubscriptionRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSubscriptionRepository.swift; sourceTree = "<group>"; };
 		6E7D02F3A53DEB8398516423 /* VideoDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoDetailView.swift; sourceTree = "<group>"; };
 		7626A188CF73E032DAE0B83F /* PlaybackItemFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackItemFactory.swift; sourceTree = "<group>"; };
 		79DD81789B83FE3F6BF6121E /* QRLoginSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRLoginSheet.swift; sourceTree = "<group>"; };
@@ -102,10 +98,8 @@
 		80626F7CEB8420B0FB5F1FAB /* Persistence */ = {
 			isa = PBXGroup;
 			children = (
-				686BC352BB0143DCE1F6BE3F /* FileSubscriptionRepository.swift */,
 				4769AD346940BDDDBCE45063 /* FileWatchHistoryRepository.swift */,
 				58FD318DE433BE535EAF7F4C /* SwiftDataModels.swift */,
-				2E9D6FF8144278A660A180E6 /* SwiftDataSubscriptionRepository.swift */,
 				07072CD24D3A0EBEACABE6A8 /* SwiftDataWatchHistoryRepository.swift */,
 			);
 			path = Persistence;
@@ -225,7 +219,6 @@
 				E4223143D17571609DA19215 /* AppEnvironment.swift in Sources */,
 				D1D5B090353CBD0411B608EA /* BiliCredentialKeychainStore.swift in Sources */,
 				4CB90FCBE2A471B4C28F17C9 /* ContentView.swift in Sources */,
-				D2672D0A8F68F21A151BB500 /* FileSubscriptionRepository.swift in Sources */,
 				1167F25EF95CA6133137448D /* FileWatchHistoryRepository.swift in Sources */,
 				87EAF7F5AC187B15D0985D13 /* HistorySyncEngine.swift in Sources */,
 				4624DBCB45CE44332B7CC476 /* HomeView.swift in Sources */,
@@ -238,7 +231,6 @@
 				753A302F250BD390A157FDE8 /* SessdataKeychainStore.swift in Sources */,
 				5BFCE7E1CA9782BB3A893C8B /* SubscriptionsView.swift in Sources */,
 				D87FDE414EA82EEB58FA946C /* SwiftDataModels.swift in Sources */,
-				E92103A06DB259BC66C487AD /* SwiftDataSubscriptionRepository.swift in Sources */,
 				DDA66EDCE177217EFFE2BD6E /* SwiftDataWatchHistoryRepository.swift in Sources */,
 				21C382618F81D228F713B3BE /* VideoDetailView.swift in Sources */,
 			);

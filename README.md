@@ -5,8 +5,7 @@
 ## 特性
 
 - iOS 16+，SwiftUI + MVVM 架构。
-- 订阅管理：支持输入 UID 或空间链接添加订阅。
-- 订阅聚合：首页拉取已订阅 UP 主最新视频。
+- 关注更新：首页基于登录账号的关注动态，按更新时间倒序展示近 1 天视频。
 - 搜索：关键词搜索，支持第 1~3 页。
 - 视频详情：标题、UP、分 P、公开统计数据。
 - 原生播放：支持 `durl` 与 `dash`，包含多路回退与兼容性重试策略。
@@ -19,7 +18,7 @@
 ### 数据来源
 
 - 优先解析公开网页内嵌 JSON（如 `__INITIAL_STATE__` / `__playinfo__`）。
-- 关键场景具备公开 API 回退（如搜索、订阅、播放地址）。
+- 关键场景具备公开 API 支持（如搜索、关注流、播放地址）。
 - 请求层会自动注入必要的 `Referer` / `Origin` / `User-Agent`。
 
 ### 播放策略
@@ -31,7 +30,7 @@
 
 ### 持久化
 
-- 默认：文件存储（`Application Support/NewBi/subscriptions.json`、`history.json`）。
+- 默认：文件存储（`Application Support/NewBi/history.json`）。
 - 可选：iOS 17+ 通过环境变量 `NEWBI_ENABLE_SWIFTDATA=1` 启用 SwiftData。
 - 凭据使用 Keychain 存储（`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`）。
 - 同步元数据持久化在 `Application Support/NewBi/history_sync_meta.json`。
@@ -89,14 +88,14 @@ swift test
 
 ## 使用说明（MVP）
 
-1. 进入「订阅」页，添加 UID 或空间链接。
-2. 在同页扫码登录或手动导入 `SESSDATA + bili_jct`。
-3. 前往「首页」点击刷新查看聚合视频。
-4. 进入详情后选择分 P 播放。
-5. 返回「订阅」页查看观看历史与同步状态，必要时点击「立即同步」。
+1. 进入「我的」页，扫码登录或手动导入 `SESSDATA + bili_jct`。
+2. 前往「首页」查看关注更新（自动按更新时间倒序，近 1 天窗口）。
+3. 点击任意视频进入详情后选择分 P 播放。
+4. 返回「我的」页查看观看历史与同步状态，必要时点击「立即同步」。
 
 ## 已知限制
 
+- 首页关注流依赖登录态；未登录时仅显示登录提示。
 - 解析依赖 B 站公开页面结构；若页面改版，解析器需要同步更新。
 - 公开接口可能触发频控/风控，已实现部分回退，但不保证所有场景稳定可用。
 - 当前为 MVP，尚未覆盖登录体系、互动能力、弹幕、离线缓存等完整能力。

@@ -1,11 +1,5 @@
 import Foundation
 
-public protocol SubscriptionRepository: Sendable {
-    func list() async throws -> [Subscription]
-    func add(input: String) async throws -> Subscription
-    func remove(id: UUID) async throws
-}
-
 public protocol WatchHistoryRepository: Sendable {
     func list() async throws -> [WatchHistoryRecord]
     func record(
@@ -36,6 +30,7 @@ public extension WatchHistoryRepository {
 }
 
 public protocol BiliPublicClient: Sendable {
+    func fetchFollowingVideos(maxPages: Int) async throws -> [VideoCard]
     func fetchSubscriptionVideos(uid: String) async throws -> [VideoCard]
     func searchVideos(keyword: String, page: Int) async throws -> [VideoCard]
     func fetchVideoDetail(bvid: String) async throws -> VideoDetail
