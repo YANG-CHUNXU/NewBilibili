@@ -11,7 +11,7 @@ public actor RequestScheduler {
     private var states: [String: HostState] = [:]
 
     public init(maxConcurrentPerHost: Int = 2, minIntervalMs: UInt64 = 600) {
-        self.maxConcurrentPerHost = maxConcurrentPerHost
+        self.maxConcurrentPerHost = max(1, maxConcurrentPerHost)
         self.minIntervalNs = minIntervalMs * 1_000_000
     }
 

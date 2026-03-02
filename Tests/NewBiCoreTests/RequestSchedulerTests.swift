@@ -2,6 +2,11 @@ import XCTest
 @testable import NewBiCore
 
 final class RequestSchedulerTests: XCTestCase {
+    func testInvalidMaxConcurrentPerHostIsClampedToOne() async {
+        await assertInvalidConcurrencyCanAcquire(0)
+        await assertInvalidConcurrencyCanAcquire(-3)
+    }
+
     func testCancelledWaiterDoesNotAcquireSlotAfterRelease() async throws {
         let scheduler = RequestScheduler(maxConcurrentPerHost: 1, minIntervalMs: 0)
         let host = "api.bilibili.com"
@@ -44,5 +49,24 @@ final class RequestSchedulerTests: XCTestCase {
 
         await fulfillment(of: [probeAcquired], timeout: 1.0)
         _ = await probe.result
+    }
+
+    private func assertInvalidConcurrencyCanAcquire(_ maxConcurrentPerHost: Int) async {
+        let scheduler = RequestScheduler(maxConcurrentPerHost: maxConcurrentPerHost, minIntervalMs: 0)
+        let host = "api.bilibili.com"
+        let acquired = expectation(description: "acquired with maxConcurrentPerHost=\(maxConcurrentPerHost)")
+
+        let task = Task {
+            do {
+                try await scheduler.acquire(host: host)
+                await scheduler.release(host: host)
+                acquired.fulfill()
+            } catch {
+                XCTFail("Acquire should not fail for invalid maxConcurrentPerHost \(maxConcurrentPerHost), got \(error)")
+            }
+        }
+
+        await fulfillment(of: [acquired], timeout: 1.0)
+        _ = await task.result
     }
 }

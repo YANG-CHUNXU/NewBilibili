@@ -8,7 +8,7 @@ private enum FileWatchHistoryRepositoryError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .initialLoadFailed:
-            return "读取本地观看历史失败，已阻止后续写入以避免覆盖已有数据。"
+            return "读取本地观看历史失败，除清空历史外的读写已阻止以避免覆盖已有数据。"
         }
     }
 
@@ -20,7 +20,7 @@ private enum FileWatchHistoryRepositoryError: LocalizedError {
     }
 
     var recoverySuggestion: String? {
-        "请检查历史文件内容或从备份恢复后重试。"
+        "可在应用内执行“清空历史”重建文件，或从备份恢复后重试。"
     }
 }
 
@@ -29,7 +29,7 @@ actor FileWatchHistoryRepository: WatchHistoryRepository {
 
     private let fileURL: URL
     private var cache: [WatchHistoryRecord]
-    private let loadError: FileWatchHistoryRepositoryError?
+    private var loadError: FileWatchHistoryRepositoryError?
     private let encoder = JSONEncoder()
 
     init(fileURL: URL) {
@@ -99,9 +99,13 @@ actor FileWatchHistoryRepository: WatchHistoryRepository {
     }
 
     func clear() async throws {
-        try ensureLoadSucceeded()
+        let hadLoadError = (loadError != nil)
         cache = []
         try persist()
+        if hadLoadError {
+            Self.logger.notice("Watch history store recovered by clear [path=\(self.fileURL.path, privacy: .public)]")
+        }
+        loadError = nil
     }
 
     private func persist() throws {

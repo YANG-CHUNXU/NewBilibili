@@ -529,6 +529,6 @@ actor SyncingWatchHistoryRepository: WatchHistoryRepository {
     func clear() async throws {
         try await localRepository.clear()
         await syncEngine.recordLocalClear()
-        await syncEngine.triggerMutationSync()
+        await syncEngine.triggerManualSync()
     }
 }
