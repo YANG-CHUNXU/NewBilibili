@@ -99,11 +99,15 @@ public final class PublicWebFetcher: @unchecked Sendable {
             return
         }
 
-        _ = try? await fetchData(
-            url: url,
-            accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-        )
-        await warmupGate.markWarmup()
+        do {
+            _ = try await fetchData(
+                url: url,
+                accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            )
+            await warmupGate.markWarmup()
+        } catch {
+            // Keep warmup open for immediate retry after failure.
+        }
     }
 
     private func fetchData(
@@ -117,7 +121,7 @@ public final class PublicWebFetcher: @unchecked Sendable {
             throw BiliClientError.invalidInput("URL 缺少 host")
         }
 
-        await scheduler.acquire(host: host)
+        try await scheduler.acquire(host: host)
         defer {
             Task { await scheduler.release(host: host) }
         }
@@ -165,15 +169,19 @@ public final class PublicWebFetcher: @unchecked Sendable {
                 }
 
                 if (500...599).contains(http.statusCode), attempt < 2 {
-                    try? await Task.sleep(nanoseconds: retryDelayNs(attempt: attempt))
+                    try await Task.sleep(nanoseconds: retryDelayNs(attempt: attempt))
                     continue
                 }
 
                 throw BiliClientError.networkFailed("HTTP \(http.statusCode)")
             } catch {
+                if isCancellationError(error) {
+                    throw CancellationError()
+                }
+
                 lastError = error
                 if shouldRetry(error: error), attempt < 2 {
-                    try? await Task.sleep(nanoseconds: retryDelayNs(attempt: attempt))
+                    try await Task.sleep(nanoseconds: retryDelayNs(attempt: attempt))
                     continue
                 }
                 throw mapNetworkError(error)
@@ -196,6 +204,27 @@ public final class PublicWebFetcher: @unchecked Sendable {
         default:
             return false
         }
+    }
+
+    private func isCancellationError(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+
+        if let urlError = error as? URLError, urlError.code == .cancelled {
+            return true
+        }
+
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled {
+            return true
+        }
+
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? Error {
+            return isCancellationError(underlying)
+        }
+
+        return false
     }
 
     private func mapNetworkError(_ error: Error) -> BiliClientError {

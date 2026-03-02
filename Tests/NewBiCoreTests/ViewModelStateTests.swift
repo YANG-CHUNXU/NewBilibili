@@ -90,19 +90,32 @@ private actor MockBiliClient: BiliPublicClient {
 }
 
 private actor KeywordMockBiliClient: BiliPublicClient {
+    struct SearchStep {
+        let result: Result<[VideoCard], Error>
+        let delayNanoseconds: UInt64
+
+        init(result: Result<[VideoCard], Error>, delayNanoseconds: UInt64 = 0) {
+            self.result = result
+            self.delayNanoseconds = delayNanoseconds
+        }
+    }
+
     struct DetailStep {
         let result: Result<VideoDetail, Error>
         let delayNanoseconds: UInt64
     }
 
     private let searchResultsByKeyword: [String: [VideoCard]]
+    private var searchStepsByKeyword: [String: [SearchStep]]
     private var detailStepsByBVID: [String: [DetailStep]]
 
     init(
         searchResultsByKeyword: [String: [VideoCard]],
+        searchStepsByKeyword: [String: [SearchStep]] = [:],
         detailStepsByBVID: [String: [DetailStep]]
     ) {
         self.searchResultsByKeyword = searchResultsByKeyword
+        self.searchStepsByKeyword = searchStepsByKeyword
         self.detailStepsByBVID = detailStepsByBVID
     }
 
@@ -115,6 +128,20 @@ private actor KeywordMockBiliClient: BiliPublicClient {
     }
 
     func searchVideos(keyword: String, page: Int) async throws -> [VideoCard] {
+        var steps = searchStepsByKeyword[keyword] ?? []
+        if !steps.isEmpty {
+            let step = steps.removeFirst()
+            searchStepsByKeyword[keyword] = steps
+            if step.delayNanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: step.delayNanoseconds)
+            }
+            switch step.result {
+            case .success(let cards):
+                return cards
+            case .failure(let error):
+                throw error
+            }
+        }
         searchResultsByKeyword[keyword, default: []]
     }
 
@@ -385,6 +412,47 @@ final class ViewModelStateTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 400_000_000)
         XCTAssertEqual(vm.results.first?.bvid, newBVID)
         XCTAssertEqual(vm.results.first?.durationText, "01:30")
+    }
+
+    @MainActor
+    func testSearchViewModelLaterSearchDoesNotGetOverwrittenBySlowerPreviousResponse() async {
+        let oldCard = makeCard(bvid: "BV1SLOW", title: "slow", durationText: "00:40")
+        let newCard = makeCard(bvid: "BV1FAST", title: "fast", durationText: "00:20")
+
+        let client = KeywordMockBiliClient(
+            searchResultsByKeyword: [:],
+            searchStepsByKeyword: [
+                "first": [
+                    .init(
+                        result: .success([oldCard]),
+                        delayNanoseconds: 200_000_000
+                    )
+                ],
+                "second": [
+                    .init(
+                        result: .success([newCard]),
+                        delayNanoseconds: 20_000_000
+                    )
+                ]
+            ],
+            detailStepsByBVID: [:]
+        )
+
+        let vm = SearchViewModel(biliClient: client)
+        vm.page = 1
+
+        vm.keyword = "first"
+        let firstSearch = Task { await vm.search() }
+
+        try? await Task.sleep(nanoseconds: 30_000_000)
+
+        vm.keyword = "second"
+        let secondSearch = Task { await vm.search() }
+
+        await secondSearch.value
+        await firstSearch.value
+
+        XCTAssertEqual(vm.results.map(\.bvid), ["BV1FAST"])
     }
 
     @MainActor

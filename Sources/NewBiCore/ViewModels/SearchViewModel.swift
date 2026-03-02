@@ -14,6 +14,8 @@ public final class SearchViewModel: ObservableObject {
     private let biliClient: any BiliPublicClient
     private let durationHydrator: VideoDurationHydrator
     private let maxConcurrentDurationHydration: Int
+    private var searchTask: Task<Void, Never>?
+    private var activeSearchToken = UUID()
     private var durationHydrationTask: Task<Void, Never>?
     private var durationHydrationToken = UUID()
 
@@ -38,14 +40,30 @@ public final class SearchViewModel: ObservableObject {
         self.maxConcurrentDurationHydration = max(1, maxConcurrentDurationHydration)
     }
 
+    public func submitSearch() {
+        searchTask?.cancel()
+        searchTask = Task { [weak self] in
+            await self?.search()
+        }
+    }
+
     public func search() async {
+        let searchToken = UUID()
+        activeSearchToken = searchToken
         resetDurationHydrationState()
         isLoading = true
-        defer { isLoading = false }
+        defer {
+            if activeSearchToken == searchToken {
+                isLoading = false
+            }
+        }
         errorMessage = nil
 
         do {
             let fetched = try await biliClient.searchVideos(keyword: keyword, page: page)
+            guard shouldApplySearchResult(token: searchToken) else {
+                return
+            }
             let pendingBVIDs = Set(fetched.compactMap { video in
                 video.durationText == nil ? video.bvid : nil
             })
@@ -65,11 +83,27 @@ public final class SearchViewModel: ObservableObject {
                 )
             }
             scheduleDurationHydration(for: Array(pendingBVIDs))
+        } catch is CancellationError {
+            // Ignore cancelled/stale requests.
+            return
         } catch {
+            guard shouldApplySearchResult(token: searchToken) else {
+                return
+            }
             resetDurationHydrationState()
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             results = []
         }
+    }
+
+    private func shouldApplySearchResult(token: UUID) -> Bool {
+        guard token == activeSearchToken else {
+            return false
+        }
+        guard !Task.isCancelled else {
+            return false
+        }
+        return true
     }
 
     private func resetDurationHydrationState() {

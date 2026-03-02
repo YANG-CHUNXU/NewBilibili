@@ -268,9 +268,17 @@ final class BiliCookieStore {
         guard let cookies = cookieStorage.cookies else {
             return
         }
-        for cookie in cookies where cookie.domain.localizedCaseInsensitiveContains("bilibili.com") {
+        for cookie in cookies where isBilibiliCookieDomain(cookie.domain) {
             cookieStorage.deleteCookie(cookie)
         }
+    }
+
+    private func isBilibiliCookieDomain(_ rawDomain: String) -> Bool {
+        let normalized = rawDomain
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        return normalized == "bilibili.com" || normalized.hasSuffix(".bilibili.com")
     }
 
     private func makeConfiguredStatus(_ credential: BiliCredential) -> BiliCookieStatus {

@@ -33,7 +33,7 @@ struct SearchView: View {
                 .pickerStyle(.segmented)
 
                 Button("搜索") {
-                    Task { await viewModel.search() }
+                    viewModel.submitSearch()
                 }
                 .disabled(viewModel.keyword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }

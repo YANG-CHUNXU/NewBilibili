@@ -15,23 +15,25 @@ public actor RequestScheduler {
         self.minIntervalNs = minIntervalMs * 1_000_000
     }
 
-    public func acquire(host: String) async {
+    public func acquire(host: String) async throws {
         while true {
+            try Task.checkCancellation()
+
             let now = DispatchTime.now().uptimeNanoseconds
-            var state = states[host, default: HostState()]
+            let state = states[host, default: HostState()]
             let elapsed = now &- state.lastRequestUptimeNs
 
             if state.inFlight < maxConcurrentPerHost && elapsed >= minIntervalNs {
-                state.inFlight += 1
-                state.lastRequestUptimeNs = now
-                states[host] = state
+                var nextState = state
+                nextState.inFlight += 1
+                nextState.lastRequestUptimeNs = now
+                states[host] = nextState
                 return
             }
 
-            states[host] = state
             let remainingInterval = elapsed >= minIntervalNs ? 0 : minIntervalNs - elapsed
             let sleepNs = max(remainingInterval, 50_000_000)
-            try? await Task.sleep(nanoseconds: sleepNs)
+            try await Task.sleep(nanoseconds: sleepNs)
         }
     }
 
