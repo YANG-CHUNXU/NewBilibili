@@ -30,12 +30,12 @@ actor FileWatchHistoryRepository: WatchHistoryRepository {
     private let fileURL: URL
     private var cache: [WatchHistoryRecord]
     private var loadError: FileWatchHistoryRepositoryError?
+    private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
 
     init(fileURL: URL) {
         self.fileURL = fileURL
 
-        let decoder = JSONDecoder()
         let initialCache: [WatchHistoryRecord]
         let initialLoadError: FileWatchHistoryRepositoryError?
         do {
@@ -122,8 +122,18 @@ actor FileWatchHistoryRepository: WatchHistoryRepository {
     }
 
     private func ensureLoadSucceeded() throws {
-        if let loadError {
-            throw loadError
+        guard loadError != nil else {
+            return
+        }
+
+        do {
+            cache = try Self.load(url: fileURL, decoder: decoder)
+            loadError = nil
+            Self.logger.notice("Watch history store recovered by reload [path=\(self.fileURL.path, privacy: .public)]")
+        } catch {
+            let wrapped = FileWatchHistoryRepositoryError.initialLoadFailed(fileURL: fileURL, underlying: error)
+            loadError = wrapped
+            throw wrapped
         }
     }
 }
