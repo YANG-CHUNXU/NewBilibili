@@ -62,8 +62,12 @@ actor VideoDurationHydrator {
         return resolved
     }
 
-    nonisolated static func formatDuration(_ totalSeconds: Int) -> String {
-        let seconds = max(0, totalSeconds)
+    nonisolated static func formatDuration(_ totalSeconds: Int?) -> String? {
+        guard let totalSeconds, totalSeconds > 0 else {
+            return nil
+        }
+
+        let seconds = totalSeconds
         let hours = seconds / 3600
         let minutes = (seconds % 3600) / 60
         let remainder = seconds % 60

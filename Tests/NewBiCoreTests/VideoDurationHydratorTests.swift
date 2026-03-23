@@ -75,6 +75,20 @@ final class VideoDurationHydratorTests: XCTestCase {
         XCTAssertEqual(fetchCount, 1)
     }
 
+    func testResolveDurationTextFormatsHourAwareDuration() async {
+        let bvid = "BV1HOUR"
+        let client = DurationHydratorMockClient(
+            detailResponsesByBVID: [
+                bvid: .success(makeDetail(bvid: bvid, partDurations: [3661]))
+            ]
+        )
+        let hydrator = VideoDurationHydrator()
+
+        let resolved = await hydrator.resolveDurationText(bvid: bvid, using: client)
+
+        XCTAssertEqual(resolved, "1:01:01")
+    }
+
     func testResolveDurationTextSumsMultiPartDurations() async {
         let bvid = "BV1MULTI"
         let client = DurationHydratorMockClient(

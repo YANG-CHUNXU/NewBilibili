@@ -104,8 +104,8 @@ final class PublicWebFetcherCancellationTests: XCTestCase {
         }
 
         let fetcher = makeFetcher()
-        let task = Task {
-            try await fetcher.fetchJSON(url: URL(string: "https://api.bilibili.com/x/test")!)
+        let task = Task<Void, Error> {
+            _ = try await fetcher.fetchJSON(url: URL(string: "https://api.bilibili.com/x/test")!)
         }
 
         await fulfillment(of: [firstRequest], timeout: 1.0)

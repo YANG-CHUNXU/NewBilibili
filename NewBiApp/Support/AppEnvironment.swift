@@ -305,6 +305,7 @@ final class AppEnvironment: ObservableObject {
     @Published private(set) var bilibiliCookieConfigured = false
     @Published private(set) var bilibiliHistoryWriteEnabled = false
     @Published private(set) var bilibiliCookieStatusText = "未导入登录态"
+    @Published private(set) var bilibiliAccountCacheScope = "anonymous"
 
     let biliClient: any BiliPublicClient
     let biliAuthClient: any BiliAuthClient
@@ -330,9 +331,13 @@ final class AppEnvironment: ObservableObject {
         let credentialProvider: @Sendable () -> BiliCredential? = {
             credentialStore.readCredential()
         }
+        let accountScopeProvider: @Sendable () -> String? = {
+            credentialStore.readCredential()?.accountCacheScope
+        }
 
         self.biliClient = DefaultBiliPublicClient(
-            fetcher: PublicWebFetcher(credentialProvider: credentialProvider)
+            fetcher: PublicWebFetcher(credentialProvider: credentialProvider),
+            accountScopeProvider: accountScopeProvider
         )
         self.biliAuthClient = DefaultBiliAuthClient(fetcher: PublicWebFetcher())
         self.playbackItemFactory = PlaybackItemFactory()
@@ -399,9 +404,7 @@ final class AppEnvironment: ObservableObject {
             sessdataRaw: sessdataRaw,
             biliJctRaw: biliJctRaw
         )
-        bilibiliCookieConfigured = status.isConfigured
-        bilibiliHistoryWriteEnabled = status.canWriteHistory
-        bilibiliCookieStatusText = status.summary
+        applyCookieStatus(status)
 
         Task {
             await historySyncEngine.triggerManualSync()
@@ -410,9 +413,7 @@ final class AppEnvironment: ObservableObject {
 
     func importBilibiliCredentialFromQR(_ credential: BiliCredential) throws {
         let status = try cookieStore.importCredentialFromQR(credential)
-        bilibiliCookieConfigured = status.isConfigured
-        bilibiliHistoryWriteEnabled = status.canWriteHistory
-        bilibiliCookieStatusText = status.summary
+        applyCookieStatus(status)
 
         Task {
             await historySyncEngine.triggerManualSync()
@@ -421,9 +422,7 @@ final class AppEnvironment: ObservableObject {
 
     func clearBilibiliCookie() {
         let status = cookieStore.clearPersistedCookies()
-        bilibiliCookieConfigured = status.isConfigured
-        bilibiliHistoryWriteEnabled = status.canWriteHistory
-        bilibiliCookieStatusText = status.summary
+        applyCookieStatus(status)
     }
 
     func triggerManualHistorySync() async {
@@ -442,9 +441,14 @@ final class AppEnvironment: ObservableObject {
 
     private func refreshCookieStatus() {
         let status = cookieStore.restoreFromPersistedCredential()
+        applyCookieStatus(status)
+    }
+
+    private func applyCookieStatus(_ status: BiliCookieStatus) {
         bilibiliCookieConfigured = status.isConfigured
         bilibiliHistoryWriteEnabled = status.canWriteHistory
         bilibiliCookieStatusText = status.summary
+        bilibiliAccountCacheScope = cookieStore.currentCredential()?.accountCacheScope ?? "anonymous"
     }
 
     private func startSyncLoop() {

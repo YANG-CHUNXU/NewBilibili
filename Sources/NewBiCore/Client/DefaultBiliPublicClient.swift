@@ -10,20 +10,23 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
     private let fetcher: PublicWebFetcher
     private let parser: BiliPublicHTMLParser
     private let cache: VideoCardMemoryCache
+    private let accountScopeProvider: (@Sendable () -> String?)?
 
     public init(
         fetcher: PublicWebFetcher = PublicWebFetcher(),
         parser: BiliPublicHTMLParser = BiliPublicHTMLParser(),
-        cache: VideoCardMemoryCache = VideoCardMemoryCache()
+        cache: VideoCardMemoryCache = VideoCardMemoryCache(),
+        accountScopeProvider: (@Sendable () -> String?)? = nil
     ) {
         self.fetcher = fetcher
         self.parser = parser
         self.cache = cache
+        self.accountScopeProvider = accountScopeProvider
     }
 
     public func fetchFollowingVideos(maxPages: Int) async throws -> [VideoCard] {
         let cappedPages = max(1, maxPages)
-        let cacheKey = "following:\(cappedPages)"
+        let cacheKey = followingCacheKey(maxPages: cappedPages)
         if let cached = await cache.get(cacheKey) {
             return cached
         }
@@ -51,6 +54,11 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
         let merged = HomeFeedAssembler.merge(pages, limit: 300)
         await cache.set(cacheKey, value: merged)
         return merged
+    }
+
+    private func followingCacheKey(maxPages: Int) -> String {
+        let accountScope = accountScopeProvider?() ?? "anonymous"
+        return "following:\(accountScope):\(maxPages)"
     }
 
     public func fetchSubscriptionVideos(uid: String) async throws -> [VideoCard] {
@@ -492,7 +500,9 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
                 JSONHelpers.dateFromTimestamp(dict["pub_ts"])
             let durationText =
                 JSONHelpers.string(dict["length"]) ??
-                formatDuration(JSONHelpers.int(dict["duration"]) ?? JSONHelpers.int(dict["duration_seconds"]))
+                VideoDurationHydrator.formatDuration(
+                    JSONHelpers.int(dict["duration"]) ?? JSONHelpers.int(dict["duration_seconds"])
+                )
 
             mapped.append(
                 VideoCard(
@@ -553,7 +563,9 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
                 JSONHelpers.dateFromTimestamp(archive["timestamp"])
             let durationText =
                 JSONHelpers.string(archive["length"]) ??
-                formatDuration(JSONHelpers.int(archive["duration"]) ?? JSONHelpers.int(archive["duration_seconds"]))
+                VideoDurationHydrator.formatDuration(
+                    JSONHelpers.int(archive["duration"]) ?? JSONHelpers.int(archive["duration_seconds"])
+                )
 
             mapped.append(
                 VideoCard(
@@ -687,13 +699,6 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
             }
         }
         return nil
-    }
-
-    private func formatDuration(_ seconds: Int?) -> String? {
-        guard let seconds, seconds > 0 else {
-            return nil
-        }
-        return String(format: "%02d:%02d", seconds / 60, seconds % 60)
     }
 
     private func decodeHTMLEntities(_ text: String) -> String {

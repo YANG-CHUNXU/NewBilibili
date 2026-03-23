@@ -81,6 +81,21 @@ final class BiliHistoryClientTests: XCTestCase {
         _ = try await client.fetchHistory(cursor: nil)
     }
 
+    func testFetchHistoryPreservesMissingTimestampAsNil() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/x/web-interface/history/cursor")
+            let json = """
+            {"code":0,"data":{"cursor":{"max":123,"view_at":456,"business":"archive","has_more":false},"list":[{"bvid":"BVnil","title":"No Time","progress":9,"history":{"cid":11,"duration":120}}]}}
+            """
+            return self.response(request.url!, json: json)
+        }
+
+        let result = try await client.fetchHistory(cursor: nil)
+        XCTAssertEqual(result.items.count, 1)
+        XCTAssertNil(result.items.first?.watchedAt)
+        XCTAssertEqual(result.items.first?.cid, 11)
+    }
+
     func testReportProgressUsesPostFormBody() async throws {
         let client = makeClient { request in
             XCTAssertEqual(request.url?.path, "/x/v2/history/report")

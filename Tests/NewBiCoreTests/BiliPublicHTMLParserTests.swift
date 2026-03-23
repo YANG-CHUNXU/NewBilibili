@@ -30,6 +30,20 @@ final class BiliPublicHTMLParserTests: XCTestCase {
         XCTAssertEqual(cards.first?.authorUID, "8008")
     }
 
+    func testParseSubscriptionVideosFormatsHourAwareDurationFromHtmlFallback() throws {
+        let html = """
+        <!doctype html>
+        <html><body><script>
+        window.__INITIAL_STATE__={"arcList":{"vlist":[{"bvid":"BV1HOUR000000","title":"订阅结果Hour","pic":"//i0.hdslb.com/bfs/archive/hour.jpg","owner":{"name":"UP_OWNER","mid":"8008"},"duration":3661}]}};
+        </script></body></html>
+        """
+
+        let cards = try parser.parseSubscriptionVideos(from: html)
+
+        XCTAssertEqual(cards.count, 1)
+        XCTAssertEqual(cards.first?.durationText, "1:01:01")
+    }
+
     func testParseSubscriptionVideosFromDynamicModulesUsesModuleAuthor() throws {
         let html = """
         <!doctype html>

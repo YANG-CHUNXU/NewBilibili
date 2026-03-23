@@ -142,7 +142,7 @@ private actor KeywordMockBiliClient: BiliPublicClient {
                 throw error
             }
         }
-        searchResultsByKeyword[keyword, default: []]
+        return searchResultsByKeyword[keyword, default: []]
     }
 
     func fetchVideoDetail(bvid: String) async throws -> VideoDetail {

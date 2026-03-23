@@ -229,8 +229,7 @@ public final class DefaultBiliHistoryClient: BiliHistoryClient, @unchecked Senda
             let watchedAt =
                 JSONHelpers.dateFromTimestamp(dict["view_at"]) ??
                 JSONHelpers.dateFromTimestamp(dict["watched_at"]) ??
-                JSONHelpers.dateFromTimestamp(JSONHelpers.dict(dict["history"])?["view_at"]) ??
-                Date()
+                JSONHelpers.dateFromTimestamp(JSONHelpers.dict(dict["history"])?["view_at"])
             let cid =
                 JSONHelpers.int(dict["cid"]) ??
                 JSONHelpers.int(JSONHelpers.dict(dict["history"])?["cid"])

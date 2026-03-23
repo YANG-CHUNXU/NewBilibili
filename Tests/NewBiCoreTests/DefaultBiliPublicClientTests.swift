@@ -49,6 +49,27 @@ private final class ClientStubURLProtocol: URLProtocol {
     }
 }
 
+private final class MutableBox<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Value
+
+    init(_ value: Value) {
+        self.value = value
+    }
+
+    func get() -> Value {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func set(_ newValue: Value) {
+        lock.lock()
+        defer { lock.unlock() }
+        value = newValue
+    }
+}
+
 final class DefaultBiliPublicClientTests: XCTestCase {
     override func setUp() {
         super.setUp()
@@ -116,6 +137,28 @@ final class DefaultBiliPublicClientTests: XCTestCase {
 
         XCTAssertEqual(cards.map(\.bvid), ["BV1J99999999"])
         XCTAssertEqual(cards.first?.authorName, "UP_DYNAMIC")
+    }
+
+    func testFetchFollowingVideosFormatsHourAwareDuration() async throws {
+        ClientStubURLProtocol.prepare { request in
+            guard let url = request.url else {
+                throw URLError(.badURL)
+            }
+            guard url.path == "/x/polymer/web-dynamic/v1/feed/all" else {
+                throw URLError(.unsupportedURL)
+            }
+
+            return self.jsonResponse(
+                url: url,
+                body: #"{"code":0,"data":{"has_more":false,"offset":"","items":[{"modules":{"module_author":{"mid":"1001","name":"UP_A","pub_ts":1700000000},"module_dynamic":{"major":{"archive":{"bvid":"BV1HOUR000000","title":"Hour","cover":"//i0.hdslb.com/bfs/archive/hour.jpg","duration":3661}}}}}]}}"#
+            )
+        }
+
+        let client = makeClient()
+        let cards = try await client.fetchFollowingVideos(maxPages: 1)
+
+        XCTAssertEqual(cards.count, 1)
+        XCTAssertEqual(cards.first?.durationText, "1:01:01")
     }
 
     func testFetchFollowingVideosPaginatesByOffset() async throws {
@@ -194,7 +237,54 @@ final class DefaultBiliPublicClientTests: XCTestCase {
         }
     }
 
-    private func makeClient() -> DefaultBiliPublicClient {
+    func testFetchFollowingVideosScopesCacheByAccountIdentity() async throws {
+        let scopeBox = MutableBox("account-a")
+        let requestCount = MutableBox(0)
+
+        ClientStubURLProtocol.prepare { request in
+            guard let url = request.url else {
+                throw URLError(.badURL)
+            }
+            guard url.path == "/x/polymer/web-dynamic/v1/feed/all" else {
+                throw URLError(.unsupportedURL)
+            }
+
+            let nextCount = requestCount.get() + 1
+            requestCount.set(nextCount)
+            if nextCount == 1 {
+                return self.jsonResponse(
+                    url: url,
+                    body: #"{"code":0,"data":{"has_more":false,"offset":"","items":[{"modules":{"module_author":{"mid":"1001","name":"UP_A","pub_ts":1700000000},"module_dynamic":{"major":{"archive":{"bvid":"BV1A11111111","title":"A","cover":"//i0.hdslb.com/bfs/archive/a.jpg","duration":60}}}}}]}}"#
+                )
+            }
+            if nextCount == 2 {
+                return self.jsonResponse(
+                    url: url,
+                    body: #"{"code":0,"data":{"has_more":false,"offset":"","items":[{"modules":{"module_author":{"mid":"1002","name":"UP_B","pub_ts":1700001000},"module_dynamic":{"major":{"archive":{"bvid":"BV1B22222222","title":"B","cover":"//i0.hdslb.com/bfs/archive/b.jpg","duration":60}}}}}]}}"#
+                )
+            }
+            throw URLError(.unsupportedURL)
+        }
+
+        let client = makeClient(accountScopeProvider: { scopeBox.get() })
+
+        let first = try await client.fetchFollowingVideos(maxPages: 3)
+        XCTAssertEqual(first.map(\.bvid), ["BV1A11111111"])
+        XCTAssertEqual(requestCount.get(), 1)
+
+        let second = try await client.fetchFollowingVideos(maxPages: 3)
+        XCTAssertEqual(second.map(\.bvid), ["BV1A11111111"])
+        XCTAssertEqual(requestCount.get(), 1)
+
+        scopeBox.set("account-b")
+        let third = try await client.fetchFollowingVideos(maxPages: 3)
+        XCTAssertEqual(third.map(\.bvid), ["BV1B22222222"])
+        XCTAssertEqual(requestCount.get(), 2)
+    }
+
+    private func makeClient(
+        accountScopeProvider: (@Sendable () -> String?)? = nil
+    ) -> DefaultBiliPublicClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [ClientStubURLProtocol.self]
         let session = URLSession(configuration: configuration)
@@ -206,7 +296,8 @@ final class DefaultBiliPublicClientTests: XCTestCase {
         return DefaultBiliPublicClient(
             fetcher: fetcher,
             parser: BiliPublicHTMLParser(),
-            cache: VideoCardMemoryCache()
+            cache: VideoCardMemoryCache(),
+            accountScopeProvider: accountScopeProvider
         )
     }
 

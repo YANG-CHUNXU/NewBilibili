@@ -13,7 +13,7 @@ public struct RemoteHistoryItem: Hashable, Codable, Sendable {
     public let bvid: String
     public let title: String
     public let progressSeconds: Double
-    public let watchedAt: Date
+    public let watchedAt: Date?
     public let cid: Int?
     public let durationSeconds: Double?
 
@@ -22,7 +22,7 @@ public struct RemoteHistoryItem: Hashable, Codable, Sendable {
         bvid: String,
         title: String,
         progressSeconds: Double,
-        watchedAt: Date,
+        watchedAt: Date?,
         cid: Int?,
         durationSeconds: Double?
     ) {

@@ -48,6 +48,32 @@ final class HistorySyncMergeTests: XCTestCase {
         XCTAssertFalse(shouldApply)
     }
 
+    func testMissingRemoteTimestampDoesNotOverrideExistingLocalHistory() {
+        let local = Date(timeIntervalSince1970: 1_700_000_000)
+
+        let shouldApply = HistorySyncPolicy.shouldApplyRemote(
+            localWatchedAt: local,
+            localProgressSeconds: 20,
+            remoteWatchedAt: nil,
+            remoteProgressSeconds: 30,
+            pendingLocalWatchedAt: nil
+        )
+
+        XCTAssertFalse(shouldApply)
+    }
+
+    func testMissingRemoteTimestampDoesNotCreateSyntheticLocalHistory() {
+        let shouldApply = HistorySyncPolicy.shouldApplyRemote(
+            localWatchedAt: nil,
+            localProgressSeconds: 0,
+            remoteWatchedAt: nil,
+            remoteProgressSeconds: 30,
+            pendingLocalWatchedAt: nil
+        )
+
+        XCTAssertFalse(shouldApply)
+    }
+
     func testRetentionTrimsTo5000MostRecent() {
         let base = Date(timeIntervalSince1970: 1_700_000_000)
         let records = (0..<5_100).map { index in

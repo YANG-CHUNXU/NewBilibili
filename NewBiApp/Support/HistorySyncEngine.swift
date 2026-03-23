@@ -337,25 +337,40 @@ actor HistorySyncEngine: WatchHistorySyncCoordinator {
         var hasMore = true
         var localMap = try await makeLocalMap()
         var seenRecent: Set<String> = []
+        var coveredRecentWindow = false
+        var exhaustedRemoteHistory = false
 
         while hasMore, page < maxSweepPages {
             let result = try await historyClient.fetchHistory(cursor: cursor)
             if result.items.isEmpty {
+                exhaustedRemoteHistory = true
                 break
             }
             for item in result.items {
-                if item.watchedAt >= cutoff {
+                if let watchedAt = item.watchedAt, watchedAt >= cutoff {
+                    seenRecent.insert(item.bvid)
+                } else if let mirroredWatchedAt = meta.mirrorIndex[item.bvid]?.watchedAt,
+                          mirroredWatchedAt >= cutoff {
                     seenRecent.insert(item.bvid)
                 }
                 try await mergeRemoteItem(item, localMap: &localMap)
             }
-            if let minDate = result.items.map(\.watchedAt).min(), minDate < cutoff {
+            if let minDate = result.items.compactMap(\.watchedAt).min(), minDate < cutoff {
+                coveredRecentWindow = true
                 hasMore = false
-            } else {
-                hasMore = result.hasMore
+            } else if result.hasMore {
+                hasMore = true
                 cursor = result.nextCursor
+            } else {
+                exhaustedRemoteHistory = true
+                hasMore = false
             }
             page += 1
+        }
+
+        guard coveredRecentWindow || exhaustedRemoteHistory else {
+            meta.lastSweepAt = now
+            return
         }
 
         let candidates = meta.mirrorIndex.values.filter { $0.watchedAt >= cutoff }
@@ -394,31 +409,33 @@ actor HistorySyncEngine: WatchHistorySyncCoordinator {
             pendingLocalWatchedAt: meta.pendingUpserts[item.bvid]?.watchedAt
         )
 
-        if shouldApplyRemote {
+        if shouldApplyRemote, let watchedAt = item.watchedAt {
             let title = item.title.isEmpty ? (localMap[item.bvid]?.title ?? item.bvid) : item.title
             try await localRepository.record(
                 bvid: item.bvid,
                 title: title,
                 progressSeconds: item.progressSeconds,
-                watchedAt: item.watchedAt,
+                watchedAt: watchedAt,
                 cid: item.cid
             )
             localMap[item.bvid] = WatchHistoryRecord(
                 id: localMap[item.bvid]?.id ?? UUID(),
                 bvid: item.bvid,
                 title: title,
-                watchedAt: item.watchedAt,
+                watchedAt: watchedAt,
                 progressSeconds: item.progressSeconds,
                 cid: item.cid ?? localMap[item.bvid]?.cid
             )
         }
 
         meta.remoteKnownBVIDs.insert(item.bvid)
-        meta.mirrorIndex[item.bvid] = MirrorHistoryEntry(
-            key: item.key,
-            watchedAt: item.watchedAt,
-            updatedAt: Date()
-        )
+        if let watchedAt = item.watchedAt {
+            meta.mirrorIndex[item.bvid] = MirrorHistoryEntry(
+                key: item.key,
+                watchedAt: watchedAt,
+                updatedAt: Date()
+            )
+        }
     }
 
     private func pruneLocalHistoryIfNeeded() async throws {

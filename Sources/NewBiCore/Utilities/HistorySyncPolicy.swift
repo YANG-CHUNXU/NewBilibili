@@ -4,10 +4,13 @@ public enum HistorySyncPolicy {
     public static func shouldApplyRemote(
         localWatchedAt: Date?,
         localProgressSeconds: Double,
-        remoteWatchedAt: Date,
+        remoteWatchedAt: Date?,
         remoteProgressSeconds: Double,
         pendingLocalWatchedAt: Date?
     ) -> Bool {
+        guard let remoteWatchedAt else {
+            return false
+        }
         if let pendingLocalWatchedAt, pendingLocalWatchedAt > remoteWatchedAt {
             return false
         }

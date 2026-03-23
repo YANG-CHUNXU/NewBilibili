@@ -71,7 +71,7 @@ struct HomeView: View {
         .refreshable {
             await viewModel.load(force: true)
         }
-        .onChange(of: environment.bilibiliCookieConfigured) { _ in
+        .onChange(of: environment.bilibiliAccountCacheScope) { _ in
             Task { await viewModel.load(force: true) }
         }
     }

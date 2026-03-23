@@ -246,7 +246,7 @@ public struct BiliPublicHTMLParser: Sendable {
 
             let durationText =
                 JSONHelpers.string(dict["length"]) ??
-                formatDuration(
+                VideoDurationHydrator.formatDuration(
                     JSONHelpers.int(dict["duration"]) ??
                     JSONHelpers.int(dict["duration_seconds"])
                 )
@@ -310,7 +310,7 @@ public struct BiliPublicHTMLParser: Sendable {
                 JSONHelpers.dateFromTimestamp(archive["timestamp"])
             let durationText =
                 JSONHelpers.string(archive["length"]) ??
-                formatDuration(
+                VideoDurationHydrator.formatDuration(
                     JSONHelpers.int(archive["duration"]) ??
                     JSONHelpers.int(archive["duration_seconds"])
                 )
@@ -356,16 +356,6 @@ public struct BiliPublicHTMLParser: Sendable {
 
     private func normalizeImageURL(_ text: String?) -> URL? {
         normalizeNetworkURL(text)
-    }
-
-    private func formatDuration(_ seconds: Int?) -> String? {
-        guard let seconds, seconds > 0 else {
-            return nil
-        }
-
-        let minutes = seconds / 60
-        let remainder = seconds % 60
-        return String(format: "%02d:%02d", minutes, remainder)
     }
 
     private func parseProgressiveStream(data: [String: Any]) -> PlayableStream? {
