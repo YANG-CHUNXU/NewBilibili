@@ -96,6 +96,23 @@ final class BiliHistoryClientTests: XCTestCase {
         XCTAssertEqual(result.items.first?.cid, 11)
     }
 
+    func testFetchHistoryReadsBVIDAndCIDFromNestedHistoryObject() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/x/web-interface/history/cursor")
+            let json = """
+            {"code":0,"data":{"cursor":{"max":123,"view_at":456,"business":"archive","has_more":false},"list":[{"title":"嵌套历史","progress":18,"view_at":1735646400,"history":{"bvid":"BVnested","cid":77,"duration":210}}]}}
+            """
+            return self.response(request.url!, json: json)
+        }
+
+        let result = try await client.fetchHistory(cursor: nil)
+
+        XCTAssertEqual(result.items.count, 1)
+        XCTAssertEqual(result.items.first?.bvid, "BVnested")
+        XCTAssertEqual(result.items.first?.cid, 77)
+        XCTAssertEqual(result.items.first?.durationSeconds, 210)
+    }
+
     func testReportProgressUsesPostFormBody() async throws {
         let client = makeClient { request in
             XCTAssertEqual(request.url?.path, "/x/v2/history/report")

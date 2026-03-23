@@ -161,6 +161,62 @@ final class DefaultBiliPublicClientTests: XCTestCase {
         XCTAssertEqual(cards.first?.durationText, "1:01:01")
     }
 
+    func testFetchFollowingVideosReadsDurationTextField() async throws {
+        ClientStubURLProtocol.prepare { request in
+            guard let url = request.url else {
+                throw URLError(.badURL)
+            }
+            guard url.path == "/x/polymer/web-dynamic/v1/feed/all" else {
+                throw URLError(.unsupportedURL)
+            }
+
+            return self.jsonResponse(
+                url: url,
+                body: #"{"code":0,"data":{"has_more":false,"offset":"","items":[{"modules":{"module_author":{"mid":"1001","name":"UP_A","pub_ts":1700000000},"module_dynamic":{"major":{"archive":{"bvid":"BV1DURTEXT00","title":"DurationText","cover":"//i0.hdslb.com/bfs/archive/hour.jpg","duration_text":"12:34"}}}}}]}}"#
+            )
+        }
+
+        let client = makeClient()
+        let cards = try await client.fetchFollowingVideos(maxPages: 1)
+
+        XCTAssertEqual(cards.count, 1)
+        XCTAssertEqual(cards.first?.durationText, "12:34")
+    }
+
+    func testFetchVideoDetailUsesPublicAPIViewWhenAvailable() async throws {
+        ClientStubURLProtocol.prepare { request in
+            guard let url = request.url else {
+                throw URLError(.badURL)
+            }
+
+            if url.path == "/x/web-interface/view" {
+                let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+                let query = Dictionary(uniqueKeysWithValues: items.map { ($0.name, $0.value ?? "") })
+                XCTAssertEqual(query["bvid"], "BV1DETAILAPI0")
+                return self.jsonResponse(
+                    url: url,
+                    body: #"{"code":0,"data":{"bvid":"BV1DETAILAPI0","title":"详情接口标题","desc":"详情接口简介","owner":{"name":"UP_DETAIL"},"pages":[{"cid":9001,"page":1,"part":"P1","duration":185}],"stat":{"view":123,"like":45}}}"#
+                )
+            }
+
+            if url.host == "www.bilibili.com" {
+                XCTFail("HTML detail fallback should not be used when public API succeeds")
+                throw URLError(.unsupportedURL)
+            }
+
+            throw URLError(.unsupportedURL)
+        }
+
+        let client = makeClient()
+        let detail = try await client.fetchVideoDetail(bvid: "BV1DETAILAPI0")
+
+        XCTAssertEqual(detail.bvid, "BV1DETAILAPI0")
+        XCTAssertEqual(detail.title, "详情接口标题")
+        XCTAssertEqual(detail.authorName, "UP_DETAIL")
+        XCTAssertEqual(detail.parts.count, 1)
+        XCTAssertEqual(detail.parts.first?.durationSeconds, 185)
+    }
+
     func testFetchFollowingVideosPaginatesByOffset() async throws {
         ClientStubURLProtocol.prepare { request in
             guard let url = request.url else {

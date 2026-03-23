@@ -211,8 +211,14 @@ public final class DefaultBiliHistoryClient: BiliHistoryClient, @unchecked Senda
         var items: [RemoteHistoryItem] = []
         items.reserveCapacity(list.count)
         for rawItem in list {
-            guard let dict = JSONHelpers.dict(rawItem),
-                  let bvid = JSONHelpers.string(dict["bvid"]),
+            guard let dict = JSONHelpers.dict(rawItem) else {
+                continue
+            }
+
+            let history = JSONHelpers.dict(dict["history"])
+            guard let bvid =
+                    JSONHelpers.string(dict["bvid"]) ??
+                    JSONHelpers.string(history?["bvid"]),
                   !bvid.isEmpty
             else {
                 continue
@@ -220,22 +226,23 @@ public final class DefaultBiliHistoryClient: BiliHistoryClient, @unchecked Senda
 
             let title =
                 JSONHelpers.string(dict["title"]) ??
-                JSONHelpers.string(JSONHelpers.dict(dict["history"])?["title"]) ??
+                JSONHelpers.string(history?["title"]) ??
+                JSONHelpers.string(dict["long_title"]) ??
                 ""
             let progress =
                 JSONHelpers.double(dict["progress"]) ??
-                JSONHelpers.double(JSONHelpers.dict(dict["history"])?["progress"]) ??
+                JSONHelpers.double(history?["progress"]) ??
                 0
             let watchedAt =
                 JSONHelpers.dateFromTimestamp(dict["view_at"]) ??
                 JSONHelpers.dateFromTimestamp(dict["watched_at"]) ??
-                JSONHelpers.dateFromTimestamp(JSONHelpers.dict(dict["history"])?["view_at"])
+                JSONHelpers.dateFromTimestamp(history?["view_at"])
             let cid =
                 JSONHelpers.int(dict["cid"]) ??
-                JSONHelpers.int(JSONHelpers.dict(dict["history"])?["cid"])
+                JSONHelpers.int(history?["cid"])
             let duration =
                 JSONHelpers.double(dict["duration"]) ??
-                JSONHelpers.double(JSONHelpers.dict(dict["history"])?["duration"])
+                JSONHelpers.double(history?["duration"])
 
             items.append(
                 RemoteHistoryItem(

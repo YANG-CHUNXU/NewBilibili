@@ -160,14 +160,30 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
     }
 
     public func fetchVideoDetail(bvid: String) async throws -> VideoDetail {
-        guard !bvid.isEmpty,
-              let url = URL(string: "https://www.bilibili.com/video/\(bvid)")
-        else {
+        guard !bvid.isEmpty else {
             throw BiliClientError.invalidInput("无效 bvid")
         }
 
-        let html = try await fetcher.fetchHTML(url: url)
-        return try parser.parseVideoDetail(from: html)
+        var apiError: Error?
+        do {
+            return try await fetchVideoDetailFromPublicAPI(bvid: bvid)
+        } catch {
+            apiError = error
+        }
+
+        guard let url = URL(string: "https://www.bilibili.com/video/\(bvid)") else {
+            throw BiliClientError.invalidInput("无效 bvid")
+        }
+
+        do {
+            let html = try await fetcher.fetchHTML(url: url)
+            return try parser.parseVideoDetail(from: html)
+        } catch {
+            if let apiError {
+                throw apiError
+            }
+            throw error
+        }
     }
 
     public func resolvePlayableStream(bvid: String, cid: Int?) async throws -> PlayableStream {
@@ -438,6 +454,122 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
         return try await fetchVideoCardsFromPublicJSON(url: url, source: "搜索")
     }
 
+    private func fetchVideoDetailFromPublicAPI(bvid: String) async throws -> VideoDetail {
+        var components = URLComponents(string: "https://api.bilibili.com/x/web-interface/view")
+        components?.queryItems = [
+            URLQueryItem(name: "bvid", value: bvid)
+        ]
+
+        guard let url = components?.url else {
+            throw BiliClientError.invalidInput("视频详情参数无效")
+        }
+
+        do {
+            let json = try await fetcher.fetchJSON(url: url)
+            return try parseVideoDetailFromPublicJSON(json, fallbackBVID: bvid)
+        } catch {
+            guard isRateLimitedError(error) else {
+                throw error
+            }
+
+            await fetcher.primeBilibiliCookiesIfNeeded()
+            let retriedJSON = try await fetcher.fetchJSON(url: url)
+            return try parseVideoDetailFromPublicJSON(retriedJSON, fallbackBVID: bvid)
+        }
+    }
+
+    private func parseVideoDetailFromPublicJSON(_ root: Any, fallbackBVID: String) throws -> VideoDetail {
+        if let top = JSONHelpers.dict(root),
+           let code = JSONHelpers.int(top["code"]),
+           code != 0
+        {
+            let message = JSONHelpers.string(top["message"]) ?? JSONHelpers.string(top["msg"]) ?? "未知错误"
+            throw mapPublicAPICodeToError(code: code, message: message, source: "视频详情")
+        }
+
+        guard let top = JSONHelpers.dict(root),
+              let data = JSONHelpers.dict(top["data"])
+        else {
+            throw BiliClientError.parseFailed("视频详情返回缺少 data")
+        }
+
+        let bvid = JSONHelpers.string(data["bvid"]) ?? fallbackBVID
+        let rawTitle = JSONHelpers.string(data["title"]) ?? ""
+        guard !bvid.isEmpty, !rawTitle.isEmpty else {
+            throw BiliClientError.parseFailed("视频详情缺少必要字段")
+        }
+
+        let rawDescription = JSONHelpers.string(data["desc"])
+        let authorName = decodeHTMLEntities(
+            JSONHelpers.string(JSONHelpers.dict(data["owner"])?["name"]) ?? "未知UP主"
+        )
+        let parts = parseVideoDetailParts(from: data, fallbackTitle: rawTitle)
+        let stat = JSONHelpers.dict(data["stat"])
+        let stats = stat.map {
+            VideoStats(
+                view: JSONHelpers.int($0["view"]),
+                danmaku: JSONHelpers.int($0["danmaku"]),
+                reply: JSONHelpers.int($0["reply"]),
+                favorite: JSONHelpers.int($0["favorite"]),
+                coin: JSONHelpers.int($0["coin"]),
+                share: JSONHelpers.int($0["share"]),
+                like: JSONHelpers.int($0["like"])
+            )
+        }
+
+        return VideoDetail(
+            bvid: bvid,
+            title: decodeHTMLEntities(rawTitle),
+            description: rawDescription.map(decodeHTMLEntities),
+            authorName: authorName,
+            parts: parts,
+            stats: stats
+        )
+    }
+
+    private func parseVideoDetailParts(from data: [String: Any], fallbackTitle: String) -> [VideoPart] {
+        let mapped = (JSONHelpers.array(data["pages"]) ?? []).compactMap { raw -> VideoPart? in
+            guard let dict = JSONHelpers.dict(raw),
+                  let cid = JSONHelpers.int(dict["cid"])
+            else {
+                return nil
+            }
+
+            let page = JSONHelpers.int(dict["page"]) ?? 1
+            let title = decodeHTMLEntities(JSONHelpers.string(dict["part"]) ?? "P\(page)")
+            return VideoPart(
+                cid: cid,
+                page: page,
+                title: title,
+                durationSeconds: DurationTextResolver.seconds(from: [
+                    dict["duration"],
+                    dict["duration_text"],
+                    dict["length"]
+                ])
+            )
+        }
+
+        guard !mapped.isEmpty else {
+            guard let cid = JSONHelpers.int(data["cid"]) else {
+                return []
+            }
+            return [
+                VideoPart(
+                    cid: cid,
+                    page: 1,
+                    title: decodeHTMLEntities(JSONHelpers.string(data["part"]) ?? fallbackTitle),
+                    durationSeconds: DurationTextResolver.seconds(from: [
+                        data["duration"],
+                        data["duration_text"],
+                        data["length"]
+                    ])
+                )
+            ]
+        }
+
+        return mapped
+    }
+
     private func fetchVideoCardsFromPublicJSON(url: URL, source: String) async throws -> [VideoCard] {
         let json = try await fetcher.fetchJSON(url: url)
         do {
@@ -498,11 +630,13 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
                 JSONHelpers.dateFromTimestamp(dict["ctime"]) ??
                 JSONHelpers.dateFromTimestamp(dict["timestamp"]) ??
                 JSONHelpers.dateFromTimestamp(dict["pub_ts"])
-            let durationText =
-                JSONHelpers.string(dict["length"]) ??
-                VideoDurationHydrator.formatDuration(
-                    JSONHelpers.int(dict["duration"]) ?? JSONHelpers.int(dict["duration_seconds"])
-                )
+            let durationText = DurationTextResolver.text(from: [
+                dict["length"],
+                dict["duration_text"],
+                dict["length_text"],
+                dict["duration"],
+                dict["duration_seconds"]
+            ])
 
             mapped.append(
                 VideoCard(
@@ -561,11 +695,13 @@ public final class DefaultBiliPublicClient: BiliPublicClient, @unchecked Sendabl
                 JSONHelpers.dateFromTimestamp(archive["ctime"]) ??
                 JSONHelpers.dateFromTimestamp(archive["created"]) ??
                 JSONHelpers.dateFromTimestamp(archive["timestamp"])
-            let durationText =
-                JSONHelpers.string(archive["length"]) ??
-                VideoDurationHydrator.formatDuration(
-                    JSONHelpers.int(archive["duration"]) ?? JSONHelpers.int(archive["duration_seconds"])
-                )
+            let durationText = DurationTextResolver.text(from: [
+                archive["length"],
+                archive["duration_text"],
+                archive["length_text"],
+                archive["duration"],
+                archive["duration_seconds"]
+            ])
 
             mapped.append(
                 VideoCard(

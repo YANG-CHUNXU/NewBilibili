@@ -51,7 +51,11 @@ public struct BiliPublicHTMLParser: Sendable {
                 cid: cid,
                 page: page,
                 title: name,
-                durationSeconds: JSONHelpers.int(partDict["duration"])
+                durationSeconds: DurationTextResolver.seconds(from: [
+                    partDict["duration"],
+                    partDict["duration_text"],
+                    partDict["length"]
+                ])
             )
         }
 
@@ -244,12 +248,13 @@ public struct BiliPublicHTMLParser: Sendable {
                 JSONHelpers.dateFromTimestamp(dict["timestamp"]) ??
                 JSONHelpers.dateFromTimestamp(dict["pub_ts"])
 
-            let durationText =
-                JSONHelpers.string(dict["length"]) ??
-                VideoDurationHydrator.formatDuration(
-                    JSONHelpers.int(dict["duration"]) ??
-                    JSONHelpers.int(dict["duration_seconds"])
-                )
+            let durationText = DurationTextResolver.text(from: [
+                dict["length"],
+                dict["duration_text"],
+                dict["length_text"],
+                dict["duration"],
+                dict["duration_seconds"]
+            ])
 
             mapped.append(
                 VideoCard(
@@ -308,12 +313,13 @@ public struct BiliPublicHTMLParser: Sendable {
                 JSONHelpers.dateFromTimestamp(archive["ctime"]) ??
                 JSONHelpers.dateFromTimestamp(archive["created"]) ??
                 JSONHelpers.dateFromTimestamp(archive["timestamp"])
-            let durationText =
-                JSONHelpers.string(archive["length"]) ??
-                VideoDurationHydrator.formatDuration(
-                    JSONHelpers.int(archive["duration"]) ??
-                    JSONHelpers.int(archive["duration_seconds"])
-                )
+            let durationText = DurationTextResolver.text(from: [
+                archive["length"],
+                archive["duration_text"],
+                archive["length_text"],
+                archive["duration"],
+                archive["duration_seconds"]
+            ])
 
             mapped.append(
                 VideoCard(
